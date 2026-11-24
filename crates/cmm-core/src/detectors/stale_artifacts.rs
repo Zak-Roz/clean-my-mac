@@ -171,6 +171,17 @@ fn tracked_by_git(dir: &Path) -> bool {
     }
 }
 
+/// "<repo or project name>/<path inside it>", e.g. `example-app/apps/web/node_modules`. The
+/// repository root is used when it lies inside the scanned root (a dotfiles repo at `~` is not).
+fn label_for(artifact: &Path, project: &Path, roots: &[PathBuf]) -> String {
+    let base = repo_root(project)
+        .filter(|repo| roots.iter().any(|root| repo.starts_with(root) && *repo != root.as_path()))
+        .unwrap_or(project);
+    let name = base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let rel = artifact.strip_prefix(base).unwrap_or(artifact);
+    format!("{name}/{}", rel.display())
+}
+
 impl Detector for StaleArtifactsDetector {
     fn detect(&self, rule: &RuleDef, ctx: &ScanContext) -> Result<Vec<Finding>, CoreError> {
         let days = param_u64(rule, "days").unwrap_or(u64::from(ctx.config.stale_days)) as i64;
@@ -180,10 +191,12 @@ impl Detector for StaleArtifactsDetector {
             .collect();
 
         let mut walked = Walked::default();
+        let mut roots = Vec::new();
         for_each_root(rule, ctx, |root| {
             let dev = std::fs::metadata(root)?.dev();
             list_dir(root)?; // unreadable root -> error for this root
             walked.absorb(Walker { names: &names, dev }.walk(root, 0, None), true);
+            roots.push(root.to_path_buf());
             Ok(())
         })?;
 
@@ -232,9 +245,7 @@ impl Detector for StaleArtifactsDetector {
                 let size = ctx.sizer.size_of(artifact);
                 let reason = format!("Project untouched for {} days", days_since(ctx.now, last));
                 let mut f = make_finding(rule, &artifact.to_string_lossy(), Some(artifact), &size, reason);
-                let project_name = project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let rel = artifact.strip_prefix(project).unwrap_or(artifact);
-                f.label = format!("{project_name}/{}", rel.display());
+                f.label = label_for(artifact, project, &roots);
                 f.last_used = Some(last);
                 Some(f)
             })
@@ -339,6 +350,15 @@ mod tests {
         let found = detect(home.path());
         // build/ is tracked by git -> not an artifact; dist/ and node_modules are ignored -> stale.
         assert_eq!(labels(&found), vec!["repo/dist", "repo/node_modules"]);
+        assert_eq!(
+            label_for(
+                &repo.join("apps/web/node_modules"),
+                &repo.join("apps/web"),
+                &[repo.parent().unwrap().to_path_buf()]
+            ),
+            "repo/apps/web/node_modules"
+        );
+        assert_eq!(label_for(&repo.join("node_modules"), &repo, std::slice::from_ref(&repo)), "repo/node_modules");
 
         // A fresh commit (files untouched) makes the project active.
         git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "now"]);

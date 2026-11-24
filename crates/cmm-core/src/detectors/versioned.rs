@@ -5,7 +5,8 @@
 //! needs ≥ 2 members, at least one token, and letters in the non-token stem — except pure version
 //! names (`2.1.330`, as in Claude Code's `versions/`), which group on their own. Newest = parsed date when
 //! every member has one, else version when every member has one, else mtime. Members of a group are
-//! never walked into.
+//! never walked into. Photos, recordings and audio are never grouped: `IMG_20240101_120000.jpg` and
+//! `IMG_20240101_120019.jpg` are two captures, not two versions.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -38,6 +39,16 @@ impl Detector for VersionedSiblingsDetector {
     }
 }
 
+/// Timestamped media names are captures, not versions.
+const MEDIA_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "heic", "heif", "gif", "webp", "tif", "tiff", "bmp", "raw", "dng", "cr2", "cr3", "nef",
+    "arw", "mov", "mp4", "m4v", "avi", "mkv", "webm", "mp3", "m4a", "wav", "aac", "flac", "ogg", "opus",
+];
+
+fn is_media(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, ext)| MEDIA_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
 struct Member<'a> {
     entry: &'a Entry,
     info: NameInfo,
@@ -54,7 +65,7 @@ fn groups_in(
     keep: usize,
 ) -> (Vec<Finding>, Vec<String>) {
     let mut groups: BTreeMap<(bool, String), Vec<Member>> = BTreeMap::new();
-    for entry in entries.iter().filter(|e| !e.is_hidden() && (e.is_file() || e.is_dir())) {
+    for entry in entries.iter().filter(|e| !e.is_hidden() && (e.is_dir() || (e.is_file() && !is_media(&e.name)))) {
         let info = name_info(&entry.name);
         groups.entry((entry.is_dir(), info.key.clone())).or_default().push(Member {
             entry,
@@ -226,6 +237,10 @@ mod tests {
         }
         file(&versions.join("2025-04-12 14.05.31.jpg"), 100, 1);
         file(&versions.join("2025-04-12 14.11.09.jpg"), 100, 1);
+        file(&versions.join("IMG_20240101_120000.jpg"), 100, 1);
+        file(&versions.join("IMG_20240101_120019.JPG"), 100, 1);
+        file(&versions.join("Screen Recording 2026-01-01 at 10.00.00.mov"), 100, 1);
+        file(&versions.join("Screen Recording 2026-01-02 at 11.00.00.mov"), 100, 1);
         let found = detect(home.path(), serde_json::json!({"keep": 2}));
         assert_eq!(labels(&found), vec!["2.0.99", "2.1.9"]);
         assert_eq!(found[0].reason, "4 versions; keeping 2.1.331, 2.1.330");
