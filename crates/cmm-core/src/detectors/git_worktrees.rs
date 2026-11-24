@@ -9,9 +9,8 @@
 //! - directories under `<repo>/.claude/worktrees/` that git does not know → `trash` findings;
 //! - prunable entries (directory gone) → one `command` finding running `git worktree prune`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use rayon::prelude::*;
 
@@ -249,24 +248,24 @@ impl Detector for GitWorktreesDetector {
         let mut repos = BTreeSet::new();
         for_each_root(rule, ctx, |root| find_repos(root, depth, &mut repos))?;
 
-        let errors: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
-        let findings: Vec<Finding> = repos
-            .par_iter()
-            .flat_map_iter(|repo| match repo_findings(rule, ctx, repo) {
-                Ok(found) => found,
-                Err(e) => {
-                    errors.lock().unwrap_or_else(|p| p.into_inner()).insert(repo.clone(), e.to_string());
-                    Vec::new()
-                }
-            })
-            .collect();
-        let errors = errors.into_inner().unwrap_or_else(|p| p.into_inner());
-        if findings.is_empty()
-            && let Some((repo, message)) = errors.into_iter().next()
-        {
-            return Err(CoreError::Command(format!("{}: {message}", repo.display())));
+        // A failing repository never hides the others (contract v2): each failure is warned; only
+        // when every repository failed does the rule fail (with the first error).
+        let results: Vec<(&PathBuf, Result<Vec<Finding>, CoreError>)> =
+            repos.par_iter().map(|repo| (repo, repo_findings(rule, ctx, repo))).collect();
+        let any_ok = results.iter().any(|(_, r)| r.is_ok());
+        let mut findings = Vec::new();
+        let mut fatal = None;
+        for (repo, result) in results {
+            match result {
+                Ok(found) => findings.extend(found),
+                Err(e) if !any_ok && fatal.is_none() => fatal = Some((repo, e)),
+                Err(e) => ctx.warn(repo.to_string_lossy(), format!("{}: {e}", rule.id)),
+            }
         }
-        Ok(findings)
+        match fatal {
+            Some((repo, e)) => Err(CoreError::Command(format!("{}: {e}", repo.display()))),
+            None => Ok(findings),
+        }
     }
 }
 
@@ -412,6 +411,37 @@ mod tests {
         assert_eq!(found[0].label, "wt");
         assert!(found[0].reason.contains("detached at"), "{}", found[0].reason);
         assert!(found[0].blockers.is_empty(), "{:?}", found[0].blockers);
+    }
+
+    #[test]
+    fn a_broken_repository_is_warned_not_hidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let good = home.join("Developer/good");
+        std::fs::create_dir_all(&good).unwrap();
+        git_cmd(&good, &["init", "-q", "-b", "main"]);
+        git_cmd(&good, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let broken = home.join("Developer/broken");
+        std::fs::create_dir_all(broken.join(".git")).unwrap(); // an empty .git: not a repository
+
+        let env = TestEnv::new(&home);
+        let r = rule(
+            "dev.worktrees",
+            DetectorKind::GitWorktrees,
+            ActionKind::GitWorktreeRemove,
+            &["~/Developer"],
+            serde_json::json!({}),
+        );
+        assert!(GitWorktreesDetector.detect(&r, &env.ctx()).unwrap().is_empty());
+        let warned = env.sizer.take_errors();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert_eq!(warned[0].path, broken.to_string_lossy());
+        assert!(warned[0].message.starts_with("dev.worktrees: "), "{warned:?}");
+
+        // Only broken repositories: the rule itself fails.
+        std::fs::remove_dir_all(&good).unwrap();
+        let err = GitWorktreesDetector.detect(&r, &env.ctx()).unwrap_err().to_string();
+        assert!(err.contains("broken"), "{err}");
     }
 
     #[test]

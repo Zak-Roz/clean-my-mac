@@ -151,10 +151,17 @@ fn repo_root(path: &Path) -> Option<&Path> {
     path.ancestors().find(|p| p.join(".git").symlink_metadata().is_ok())
 }
 
-/// Last commit time of the repository checked out at `repo` (`None` if not a repo / git missing).
-fn last_commit(repo: &Path) -> Option<DateTime<Utc>> {
+/// Last commit time of the repository checked out at `repo` (`None` if not a repo or no commits).
+/// A git that cannot run (missing, timed out) is warned: the project is then judged by mtime only.
+fn last_commit(repo: &Path, ctx: &ScanContext) -> Option<DateTime<Utc>> {
     let dir = repo.to_string_lossy();
-    let out = external::run("git", &["-C", &dir, "log", "-1", "--format=%ct"]).ok()?;
+    let out = match external::run("git", &["-C", &dir, "log", "-1", "--format=%ct"]) {
+        Ok(out) => out,
+        Err(e) => {
+            ctx.warn(dir.as_ref(), format!("last commit unknown, judged by file dates only: {e}"));
+            return None;
+        }
+    };
     if !out.success() {
         return None;
     }
@@ -220,7 +227,7 @@ impl Detector for StaleArtifactsDetector {
                     if let Some(hit) = commit_cache.lock().unwrap_or_else(|e| e.into_inner()).get(repo) {
                         return *hit;
                     }
-                    let t = last_commit(repo);
+                    let t = last_commit(repo, ctx);
                     commit_cache.lock().unwrap_or_else(|e| e.into_inner()).insert(repo.to_path_buf(), t);
                     t
                 });

@@ -144,9 +144,14 @@ impl Detector for DockerDetector {
             let first = df.stderr.lines().next().unwrap_or("").trim().to_string();
             return Err(CoreError::Command(format!("`docker system df` failed: {first}")));
         }
-        let dangling = external::run("docker", &["images", "--filter", "dangling=true", "--format", "{{.Size}}"])
-            .map(|o| o.stdout)
-            .unwrap_or_default();
+        let dangling =
+            match external::run_ok("docker", &["images", "--filter", "dangling=true", "--format", "{{.Size}}"]) {
+                Ok(out) => out.stdout,
+                Err(e) => {
+                    ctx.warn(rule.id.as_str(), format!("dangling images not counted: {e}"));
+                    String::new()
+                }
+            };
         Ok(prune_finding(rule, &df.stdout, &dangling)?.into_iter().collect())
     }
 }

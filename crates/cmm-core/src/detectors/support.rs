@@ -12,27 +12,30 @@ use crate::model::RuleDef;
 use crate::rules::expand_roots;
 use crate::scan::ScanContext;
 
-/// Runs `per_root` on every existing root of `rule`. Root failures are tolerated as long as at
-/// least one root succeeded (the contract has no partial-error channel); if every root failed,
-/// the first error is returned so the scan reports it.
+/// Runs `per_root` on every existing root of `rule`. A failing root never hides the others: while
+/// at least one root succeeded, each failure is reported through [`ScanContext::warn`] (contract
+/// v2); if every root failed, the first error is returned (the rule fails) and the rest are warned.
 pub fn for_each_root(
     rule: &RuleDef,
     ctx: &ScanContext,
     mut per_root: impl FnMut(&Path) -> Result<(), CoreError>,
 ) -> Result<(), CoreError> {
-    let mut first_error = None;
+    let mut failures: Vec<(PathBuf, CoreError)> = Vec::new();
     let mut any_ok = false;
     for root in expand_roots(rule, &ctx.home) {
         match per_root(&root) {
             Ok(()) => any_ok = true,
-            Err(e) => {
-                first_error.get_or_insert(CoreError::Rule(format!("{}: {e}", root.display())));
-            }
+            Err(e) => failures.push((root, e)),
         }
     }
-    match first_error {
-        Some(e) if !any_ok => Err(e),
-        _ => Ok(()),
+    let mut failures = failures.into_iter();
+    let fatal = if any_ok { None } else { failures.next() };
+    for (root, e) in failures {
+        ctx.warn(root.to_string_lossy(), format!("{}: {e}", rule.id));
+    }
+    match fatal {
+        Some((root, e)) => Err(CoreError::Rule(format!("{}: {e}", root.display()))),
+        None => Ok(()),
     }
 }
 
@@ -270,6 +273,39 @@ mod tests {
         seen.sort();
         assert_eq!(seen, vec!["", "a", "a/b"]);
         assert!(walk_dirs(&dir.path().join("missing"), 3, &mut |_, _| vec![]).is_err());
+    }
+
+    #[test]
+    fn partial_root_failures_are_warned_total_failure_is_an_error() {
+        use crate::model::{ActionKind, DetectorKind};
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["good", "bad1", "bad2"] {
+            std::fs::create_dir_all(dir.path().join(name)).unwrap();
+        }
+        let env = testutil::TestEnv::new(dir.path());
+        let rule = testutil::rule(
+            "t.roots",
+            DetectorKind::Installers,
+            ActionKind::Trash,
+            &["~/good", "~/bad1", "~/bad2"],
+            serde_json::json!({}),
+        );
+        let fail_bad = |root: &Path| {
+            if root.ends_with("good") { Ok(()) } else { Err(CoreError::Rule("unreadable".into())) }
+        };
+
+        for_each_root(&rule, &env.ctx(), fail_bad).unwrap();
+        let warned = env.sizer.take_errors();
+        assert_eq!(warned.len(), 2, "{warned:?}");
+        assert!(warned.iter().all(|e| e.message.starts_with("t.roots: ") && e.message.ends_with("unreadable")));
+        assert!(warned.iter().any(|e| e.path.ends_with("bad1")) && warned.iter().any(|e| e.path.ends_with("bad2")));
+
+        let rule_all_bad = RuleDef { roots: vec!["~/bad1".into(), "~/bad2".into()], ..rule };
+        let err = for_each_root(&rule_all_bad, &env.ctx(), fail_bad).unwrap_err().to_string();
+        assert!(err.contains("bad1") && err.contains("unreadable"), "{err}");
+        let warned = env.sizer.take_errors();
+        assert_eq!(warned.len(), 1, "the other failed root is still reported: {warned:?}");
+        assert!(warned[0].path.ends_with("bad2"));
     }
 
     #[test]

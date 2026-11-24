@@ -186,8 +186,9 @@ impl Detector for SimulatorRuntimesDetector {
     fn detect(&self, rule: &RuleDef, ctx: &ScanContext) -> Result<Vec<Finding>, CoreError> {
         let runtimes = external::run_ok("xcrun", &["simctl", "runtime", "list", "-j"])?;
         let mut findings = runtime_findings(rule, &runtimes.stdout)?;
-        if let Ok(devices) = external::run_ok("xcrun", &["simctl", "list", "devices", "unavailable", "-j"]) {
-            findings.extend(unavailable_devices_finding(rule, ctx, &devices.stdout));
+        match external::run_ok("xcrun", &["simctl", "list", "devices", "unavailable", "-j"]) {
+            Ok(devices) => findings.extend(unavailable_devices_finding(rule, ctx, &devices.stdout)),
+            Err(e) => ctx.warn(rule.id.as_str(), format!("unavailable devices not checked: {e}")),
         }
         Ok(findings)
     }
