@@ -152,8 +152,11 @@ pub async fn start_scan(app: AppHandle, opts: ScanOptions) -> Result<ScanReport,
         let report = cmm_core::scan(&rules, &opts, &state.config, &|progress| {
             let _ = app.emit(SCAN_PROGRESS_EVENT, progress);
         });
-        // History is a nice-to-have: a failure here must not lose the scan.
-        if let Err(e) = state.with_history(|h| h.record_scan(&report)) {
+        // History compares whole scans, so only unfiltered ones are recorded (contract v2). It is
+        // a nice-to-have: a failure here must not lose the scan.
+        if cmm_core::scan::is_full_scan(&opts)
+            && let Err(e) = state.with_history(|h| h.record_scan(&report))
+        {
             eprintln!("cmm: scan not recorded to history: {e}");
         }
         *state.last_report.lock().map_err(|e| e.to_string())? = Some(report.clone());

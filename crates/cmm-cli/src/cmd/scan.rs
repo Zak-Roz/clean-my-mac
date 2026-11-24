@@ -24,7 +24,7 @@ pub struct ScanArgs {
     /// Only this rule id (repeatable).
     #[arg(long = "rule", value_name = "id")]
     pub rules: Vec<String>,
-    /// Do not record this scan in the history database.
+    /// Do not record this scan in the history database (filtered scans are never recorded).
     #[arg(long)]
     pub no_record: bool,
 }
@@ -49,7 +49,8 @@ pub fn run(args: ScanArgs) -> Result<ExitCode> {
     if show_progress {
         eprint!("\r\x1b[2K");
     }
-    if !args.no_record {
+    // History compares whole scans: only unfiltered ones are recorded (contract v2).
+    if !args.no_record && cmm_core::scan::is_full_scan(&opts) {
         record(&config, &report);
     }
     if args.json {

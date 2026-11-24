@@ -62,6 +62,13 @@ pub fn scan_at(
     scan_with(home, rules, opts, config, ProcessSnapshot::capture, on_progress)
 }
 
+/// Whether `opts` selects every enabled rule (no id and no category filter). Only such scans are
+/// recorded to history (contract v2): growth compares whole scans, so a filtered one would make
+/// every other finding look like it disappeared.
+pub fn is_full_scan(opts: &ScanOptions) -> bool {
+    opts.rule_ids.is_none() && opts.categories.is_none()
+}
+
 /// The rules `opts` selects: enabled, and matching the id / category filters when given.
 pub fn select_rules<'r>(rules: &'r [RuleDef], opts: &ScanOptions) -> Vec<&'r RuleDef> {
     rules
@@ -267,6 +274,15 @@ mod tests {
 
     fn ids(findings: &[Finding]) -> Vec<&str> {
         findings.iter().map(|f| f.id.as_str()).collect()
+    }
+
+    #[test]
+    fn only_unfiltered_options_are_a_full_scan() {
+        assert!(is_full_scan(&ScanOptions::default()));
+        assert!(!is_full_scan(&ScanOptions { rule_ids: Some(vec!["cache.npm".into()]), categories: None }));
+        assert!(!is_full_scan(&ScanOptions { rule_ids: None, categories: Some(vec![Category::AiTools]) }));
+        // An explicit empty filter still filters (selects nothing): not a full scan.
+        assert!(!is_full_scan(&ScanOptions { rule_ids: Some(vec![]), categories: None }));
     }
 
     #[test]
