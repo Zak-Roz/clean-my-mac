@@ -8,7 +8,9 @@ use cmm_core::model::{Category, Finding, RuleDef};
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
 
+pub mod clean;
 pub mod du;
+pub mod history;
 pub mod rules;
 pub mod scan;
 
@@ -96,5 +98,6 @@ mod tests {
         assert_eq!(display_path("/Users/me/Library/Caches", home), "~/Library/Caches");
         assert_eq!(display_path("/Users/me", home), "~");
         assert_eq!(display_path("/Users/meme/x", home), "/Users/meme/x");
+        assert_eq!(display_path("/opt/x", home), "/opt/x");
     }
 }

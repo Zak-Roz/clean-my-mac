@@ -65,15 +65,12 @@ fn run(command: Command) -> Result<ExitCode> {
     match command {
         Command::Scan(args) => cmd::scan::run(args),
         Command::Rules(args) => cmd::rules::run(args),
+        Command::Clean { ids, rules, safe, delete, yes } => {
+            cmd::clean::run(cmd::clean::Args { ids, rules, safe, delete, yes })
+        }
+        Command::History { days, json } => cmd::history::run(days, json),
         Command::Du(args) => cmd::du::run(args),
-        Command::Clean { .. } => not_implemented("clean"),
-        Command::History { .. } => not_implemented("history"),
     }
-}
-
-fn not_implemented(name: &str) -> Result<ExitCode> {
-    eprintln!("cmm {name}: not implemented yet");
-    Ok(ExitCode::from(2))
 }
 
 #[cfg(test)]
