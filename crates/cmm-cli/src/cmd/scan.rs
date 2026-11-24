@@ -1,4 +1,8 @@
-//! `cmm scan [--json] [--category <c>]... [--rule <id>]... [--no-record]`
+//! `cmm scan [--json | --quiet] [--category <c>]... [--rule <id>]... [--no-record] [--notify]`
+//!
+//! `--quiet --notify` is what the daily LaunchAgent runs (`cmm agent install`): one summary line
+//! for its log, and a macOS notification when free space is low or an item grew fast. It only
+//! scans and records; it never cleans.
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
@@ -6,10 +10,11 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
+use chrono::Local;
 use cmm_core::config::home_dir;
 use cmm_core::history::History;
 use cmm_core::model::{Category, Risk, ScanOptions, ScanReport};
-use cmm_core::{Config, CoreError};
+use cmm_core::{Config, CoreError, monitor};
 
 use super::{display_path, fmt_bytes, fmt_gb, kebab, load_rules, nested_flags, parse_category};
 
@@ -27,6 +32,14 @@ pub struct ScanArgs {
     /// Do not record this scan in the history database (filtered scans are never recorded).
     #[arg(long)]
     pub no_record: bool,
+    /// No progress and no table: print one summary line (for the background scan's log).
+    #[arg(long, conflicts_with = "json")]
+    pub quiet: bool,
+    /// After recording, post a macOS notification if free space is below the configured level or
+    /// an item grew fast (`config.toml`: low_space_threshold_bytes, growth_alert_bytes,
+    /// growth_alert_days, notifications). Needs a full, recorded scan.
+    #[arg(long, conflicts_with_all = ["no_record", "categories", "rules"])]
+    pub notify: bool,
 }
 
 pub fn run(args: ScanArgs) -> Result<ExitCode> {
@@ -40,7 +53,7 @@ pub fn run(args: ScanArgs) -> Result<ExitCode> {
         categories: (!args.categories.is_empty()).then_some(args.categories),
     };
 
-    let show_progress = !args.json && std::io::stderr().is_terminal();
+    let show_progress = !args.json && !args.quiet && std::io::stderr().is_terminal();
     let report = cmm_core::scan(&rules, &opts, &config, &|p| {
         if show_progress {
             eprint!("\r\x1b[2KScanning… {}/{} rules, {} findings", p.done_rules, p.total_rules, p.findings);
@@ -50,23 +63,90 @@ pub fn run(args: ScanArgs) -> Result<ExitCode> {
         eprint!("\r\x1b[2K");
     }
     // History compares whole scans: only unfiltered ones are recorded (contract v2).
-    if !args.no_record && cmm_core::scan::is_full_scan(&opts) {
-        record(&config, &report);
-    }
+    let history = if !args.no_record && cmm_core::scan::is_full_scan(&opts) { record(&config, &report) } else { None };
+    let notified = args.notify.then(|| notify(&config, &report, history.as_ref()));
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if args.quiet {
+        println!("{}", summary_line(&report, history.is_some(), notified.as_deref()));
     } else {
         print_report(&report, &home_dir());
+        if let Some(text) = notified {
+            println!("\nAlerts: {text}");
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
 
-/// Appends the scan to `data_dir/history.sqlite`; history being unavailable never fails a scan.
-fn record(config: &Config, report: &ScanReport) {
-    match History::open(&config.data_dir.join("history.sqlite")).and_then(|h| h.record_scan(report)) {
-        Ok(()) | Err(CoreError::Unimplemented(_)) => {}
-        Err(e) => eprintln!("warning: scan not recorded in history: {e}"),
+/// Appends the scan to `data_dir/history.sqlite` and returns the open database; history being
+/// unavailable never fails a scan.
+fn record(config: &Config, report: &ScanReport) -> Option<History> {
+    let result = History::open(&config.data_dir.join("history.sqlite")).and_then(|h| h.record_scan(report).map(|()| h));
+    match result {
+        Ok(history) => Some(history),
+        Err(CoreError::Unimplemented(_)) => None,
+        Err(e) => {
+            eprintln!("warning: scan not recorded in history: {e}");
+            None
+        }
     }
+}
+
+/// `--notify`: checks the alerts for the scan just recorded and posts one notification. Returns
+/// what happened, for the summary line. Failures are warnings, never a failed scan.
+fn notify(config: &Config, report: &ScanReport, history: Option<&History>) -> String {
+    let Some(history) = history else {
+        eprintln!("warning: alerts not checked: the scan was not recorded in history");
+        return String::from("alerts not checked");
+    };
+    let alerts = match monitor::alerts_after_scan(history, report, config, &home_dir()) {
+        Ok(alerts) => alerts,
+        Err(e) => {
+            eprintln!("warning: alerts not checked: {e}");
+            return String::from("alerts not checked");
+        }
+    };
+    let Some(notification) = monitor::compose(&alerts, report.volume.free_bytes) else {
+        return String::from("no alerts");
+    };
+    let what = format!("{} — {}", notification.subtitle, notification.body);
+    if !config.notifications {
+        return format!("not notified (notifications = false): {what}");
+    }
+    match monitor::post_notification(&notification) {
+        Ok(()) => format!("notified: {what}"),
+        Err(e) => {
+            eprintln!("warning: notification not shown: {e}");
+            format!("notification failed: {what}")
+        }
+    }
+}
+
+/// `--quiet` output: one line per scan, so the LaunchAgent log reads as a timeline.
+fn summary_line(report: &ScanReport, recorded: bool, notified: Option<&str>) -> String {
+    let nested = nested_flags(&report.findings);
+    let found: u64 = report.findings.iter().zip(&nested).filter(|(_, n)| !**n).map(|(f, _)| f.bytes).sum();
+    let mut line = format!(
+        "{} scan {}: {} free of {}, {} findings ({}), {:.1} s",
+        report.started_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+        if recorded { "recorded" } else { "not recorded" },
+        fmt_bytes(report.volume.free_bytes),
+        fmt_bytes(report.volume.total_bytes),
+        report.findings.len(),
+        fmt_bytes(found),
+        report.duration_ms as f64 / 1000.0,
+    );
+    if !report.errors.is_empty() {
+        line.push_str(&format!(", {} warnings", report.errors.len()));
+    }
+    if !report.full_disk_access {
+        line.push_str(", no Full Disk Access");
+    }
+    if let Some(text) = notified {
+        line.push_str("; ");
+        line.push_str(text);
+    }
+    line
 }
 
 fn print_report(report: &ScanReport, home: &Path) {
@@ -169,4 +249,27 @@ fn category_title(category: Category) -> String {
         Category::LargeFiles => "Large files",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quiet_summary_is_one_line_with_what_happened() {
+        let mut report: ScanReport =
+            serde_json::from_str(include_str!("../../../../fixtures/sample-report.json")).unwrap();
+        report.volume.free_bytes = 41_600_000_000;
+        report.full_disk_access = true;
+        report.errors.clear();
+        let line = summary_line(&report, true, Some("no alerts"));
+        assert!(!line.contains('\n'), "{line}");
+        assert!(line.contains(" scan recorded: 41.6 GB free of "), "{line}");
+        assert!(line.contains(&format!("{} findings (", report.findings.len())), "{line}");
+        assert!(line.ends_with("; no alerts"), "{line}");
+
+        report.full_disk_access = false;
+        let line = summary_line(&report, false, None);
+        assert!(line.contains("scan not recorded") && line.ends_with(", no Full Disk Access"), "{line}");
+    }
 }

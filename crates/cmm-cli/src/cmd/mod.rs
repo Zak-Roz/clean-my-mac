@@ -8,6 +8,7 @@ use cmm_core::model::{Category, Finding, RuleDef};
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
 
+pub mod agent;
 pub mod clean;
 pub mod du;
 pub mod history;

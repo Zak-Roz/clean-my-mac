@@ -48,6 +48,8 @@ enum Command {
     },
     /// Quick allocated-size breakdown of a directory.
     Du(cmd::du::DuArgs),
+    /// Daily background scan (LaunchAgent): install, uninstall, status. Never cleans.
+    Agent(cmd::agent::AgentArgs),
 }
 
 fn main() -> ExitCode {
@@ -70,6 +72,7 @@ fn run(command: Command) -> Result<ExitCode> {
         }
         Command::History { days, json } => cmd::history::run(days, json),
         Command::Du(args) => cmd::du::run(args),
+        Command::Agent(args) => cmd::agent::run(args),
     }
 }
 
@@ -117,6 +120,41 @@ mod tests {
         }
         let Command::Du(args) = Cli::try_parse_from(["cmm", "du", "."]).unwrap().command else { panic!() };
         assert_eq!((args.depth, args.top), (1, 20));
+    }
+
+    #[test]
+    fn parses_quiet_notify_scan() {
+        let Command::Scan(args) = Cli::try_parse_from(["cmm", "scan", "--quiet", "--notify"]).unwrap().command else {
+            panic!()
+        };
+        assert!(args.quiet && args.notify && !args.json);
+        // --notify needs a full, recorded scan; --quiet and --json exclude each other.
+        assert!(Cli::try_parse_from(["cmm", "scan", "--notify", "--no-record"]).is_err());
+        assert!(Cli::try_parse_from(["cmm", "scan", "--notify", "--rule", "cache.npm"]).is_err());
+        assert!(Cli::try_parse_from(["cmm", "scan", "--notify", "--category", "ai-tools"]).is_err());
+        assert!(Cli::try_parse_from(["cmm", "scan", "--quiet", "--json"]).is_err());
+    }
+
+    #[test]
+    fn parses_agent_subcommands() {
+        use cmd::agent::AgentAction;
+        let parse = |args: &[&str]| match Cli::try_parse_from(args).map(|c| c.command) {
+            Ok(Command::Agent(a)) => Ok(a.action),
+            Ok(other) => panic!("unexpected {other:?}"),
+            Err(e) => Err(e),
+        };
+        assert!(matches!(parse(&["cmm", "agent", "install"]), Ok(AgentAction::Install { at: (10, 0), cmm: None })));
+        match parse(&["cmm", "agent", "install", "--at", "7:30", "--cmm", "/opt/homebrew/bin/cmm"]) {
+            Ok(AgentAction::Install { at, cmm }) => {
+                assert_eq!(at, (7, 30));
+                assert_eq!(cmm.as_deref(), Some(std::path::Path::new("/opt/homebrew/bin/cmm")));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["cmm", "agent", "install", "--at", "25:00"]).is_err());
+        assert!(matches!(parse(&["cmm", "agent", "uninstall"]), Ok(AgentAction::Uninstall)));
+        assert!(matches!(parse(&["cmm", "agent", "status", "--json"]), Ok(AgentAction::Status { json: true })));
+        assert!(parse(&["cmm", "agent"]).is_err());
     }
 
     #[test]
