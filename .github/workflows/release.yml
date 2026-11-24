@@ -1,0 +1,279 @@
+name: Release
+
+# Push a tag like v0.2.0 (scripts/release.sh 0.2.0 makes the commit and the tag) to:
+#   1. check the tag matches the version in Cargo.toml, Cargo.lock, tauri.conf.json and package.json,
+#   2. build a universal clean-my-mac.app with the `cmm` CLI inside (Contents/MacOS/cmm),
+#   3. sign it with the "clean-my-mac Release" certificate (hardened runtime),
+#   4. attach clean-my-mac.zip to a GitHub release with generated notes,
+#   5. update Casks/clean-my-mac.rb in <owner>/homebrew-tap.
+# A tag with a suffix (v0.2.0-beta.1) becomes a pre-release, and Homebrew skips it.
+#
+# Repository secrets (scripts/setup-release-signing.sh sets all three):
+#   MACOS_CERT_P12           base64 of the .p12 holding the "clean-my-mac Release" certificate
+#   MACOS_CERT_PASSWORD      password of that .p12
+#   HOMEBREW_TAP_DEPLOY_KEY  private half of a write deploy key on <owner>/homebrew-tap
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Part of the designated requirement, like the certificate: changing either makes macOS forget
+  # the Full Disk Access users granted.
+  BUNDLE_ID: com.zak-roz.clean-my-mac
+  CERT_NAME: clean-my-mac Release
+  CARGO_TERM_COLOR: always
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  TURBO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  release:
+    # GitHub's macOS arm64 runners have been slow to pick jobs up, so build on the Intel image by
+    # default. The app is universal either way. Set the RELEASE_RUNNER repository variable (for
+    # example to macos-26) to build elsewhere.
+    runs-on: ${{ vars.RELEASE_RUNNER || 'macos-26-intel' }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      cask: ${{ steps.cask.outputs.cask }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Everything that can be checked before a 20-minute build is checked here.
+      - name: Check the tag, versions and secrets
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          TAP_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Tag '$TAG' must look like v1.2.3 or v1.2.3-beta.1"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          PRERELEASE=false
+          [[ "$VERSION" == *-* ]] && PRERELEASE=true
+          if ! scripts/check-version.sh "$VERSION"; then
+            echo "::error::Tag $TAG does not match the versions above. Make releases with scripts/release.sh $VERSION"
+            exit 1
+          fi
+          ID=$(plutil -extract identifier raw -o - apps/desktop/src-tauri/tauri.conf.json)
+          if [ "$ID" != "$BUNDLE_ID" ]; then
+            echo "::error::tauri.conf.json has the bundle identifier $ID, releases are $BUNDLE_ID"
+            exit 1
+          fi
+          MISSING=""
+          [ -n "$CERT_P12" ] || MISSING="$MISSING MACOS_CERT_P12"
+          [ -n "$CERT_PASSWORD" ] || MISSING="$MISSING MACOS_CERT_PASSWORD"
+          [ "$PRERELEASE" = true ] || [ -n "$TAP_KEY" ] || MISSING="$MISSING HOMEBREW_TAP_DEPLOY_KEY"
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing repository secrets:$MISSING. Run scripts/setup-release-signing.sh once (README, Releasing)."
+            exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing $VERSION, pre-release: $PRERELEASE"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target aarch64-apple-darwin,x86_64-apple-darwin
+          rustup default stable
+          rustc --version
+
+      # No dependency caches in a release build: it starts from the lockfiles alone.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install JavaScript dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          APP=$(scripts/build-app.sh --universal)
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          for EXE in "$APP"/Contents/MacOS/*; do
+            ARCHS=$(lipo -archs "$EXE")
+            echo "$EXE: $ARCHS"
+            if [[ " $ARCHS " != *" arm64 "* || " $ARCHS " != *" x86_64 "* ]]; then
+              echo "::error::$EXE is not universal ($ARCHS)"
+              exit 1
+            fi
+          done
+          SHORT_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+          CLI_VERSION=$("$APP/Contents/MacOS/cmm" --version)
+          if [ "$SHORT_VERSION" != "$VERSION" ] || [ "$CLI_VERSION" != "cmm $VERSION" ]; then
+            echo "::error::Built app $SHORT_VERSION and '$CLI_VERSION', expected $VERSION"
+            exit 1
+          fi
+
+      # One stable certificate gives the app (and the cmm inside it) the same designated requirement
+      # in every release, so macOS keeps its Full Disk Access across updates. An ad-hoc signature
+      # changes with every build.
+      - name: Import the signing certificate
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 24)
+          (umask 077; printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12")
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "SIGN_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # shellcheck disable=SC2046 # the existing search list, one keychain per word
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # codesign refuses an untrusted self-signed identity, so trust it for code signing on
+          # this runner until the cleanup step below.
+          security find-certificate -c "$CERT_NAME" -p "$KEYCHAIN" > "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+          # Without -v, so the lookup does not depend on that trust taking effect.
+          IDENTITY=$(security find-identity -p codesigning "$KEYCHAIN" | awk -v name="\"$CERT_NAME\"" 'index($0, name) {print $2; exit}')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No \"$CERT_NAME\" code signing identity in MACOS_CERT_P12"
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Sign
+        run: scripts/sign-app.sh "$APP" "$SIGN_IDENTITY" "$SIGN_KEYCHAIN"
+
+      - name: Package
+        id: package
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "$APP" clean-my-mac.zip
+          SHA256=$(shasum -a 256 clean-my-mac.zip | awk '{print $1}')
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "clean-my-mac.zip: $(du -h clean-my-mac.zip | cut -f1), sha256 $SHA256"
+          # What users get: unzip, verify the signature, run the bundled CLI.
+          CHECK="$RUNNER_TEMP/unzipped"
+          ditto -x -k clean-my-mac.zip "$CHECK"
+          codesign --verify --deep --strict "$CHECK/clean-my-mac.app"
+          "$CHECK/clean-my-mac.app/Contents/MacOS/cmm" --version
+
+      - name: Render the cask
+        id: cask
+        if: steps.version.outputs.prerelease == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          scripts/render-cask.sh --version "$VERSION" --sha256 "$SHA256" --repo "$GITHUB_REPOSITORY" > clean-my-mac.rb
+          ruby -c clean-my-mac.rb
+          cat clean-my-mac.rb
+          echo "cask=$(base64 < clean-my-mac.rb | tr -d '\n')" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          FLAGS=(--verify-tag --title "clean-my-mac $VERSION" --generate-notes)
+          if [ "$PRERELEASE" = true ]; then
+            FLAGS+=(--prerelease)
+          else
+            FLAGS+=(--latest)
+          fi
+          gh release create "$TAG" clean-my-mac.zip "${FLAGS[@]}" --repo "$GITHUB_REPOSITORY"
+
+      # Hosted runners are thrown away after the job; a self-hosted one (RELEASE_RUNNER) is not.
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          if [ -n "${SIGN_KEYCHAIN:-}" ] && [ -e "$SIGN_KEYCHAIN" ]; then
+            security delete-keychain "$SIGN_KEYCHAIN"
+          fi
+          if [ -f "$RUNNER_TEMP/cert.pem" ]; then
+            sudo security remove-trusted-cert -d "$RUNNER_TEMP/cert.pem" || true
+            HASH=$(openssl x509 -in "$RUNNER_TEMP/cert.pem" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')
+            sudo security delete-certificate -Z "$HASH" /Library/Keychains/System.keychain || true
+            rm -f "$RUNNER_TEMP/cert.pem"
+          fi
+
+  homebrew:
+    needs: release
+    if: needs.release.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Update the cask in the tap
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          VERSION: ${{ needs.release.outputs.version }}
+          CASK: ${{ needs.release.outputs.cask }}
+          OWNER: ${{ github.repository_owner }}
+          # The owner's GitHub no-reply address, e.g. Zak-Roz <56147912+Zak-Roz@users.noreply.github.com>
+          AUTHOR_NAME: ${{ github.repository_owner }}
+          AUTHOR_EMAIL: ${{ github.repository_owner_id }}+${{ github.repository_owner }}@users.noreply.github.com
+        run: |
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::Set the HOMEBREW_TAP_DEPLOY_KEY secret (scripts/setup-release-signing.sh)"
+            exit 1
+          fi
+          if [ -z "$CASK" ]; then
+            echo "::error::The release job rendered no cask"
+            exit 1
+          fi
+          KEYS="$RUNNER_TEMP/keys"
+          mkdir -m 700 "$KEYS"
+          trap 'rm -rf "$KEYS"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$KEYS/tap"
+          chmod 600 "$KEYS/tap"
+          # github.com's published ed25519 host key (https://api.github.com/meta).
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$KEYS/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $KEYS/tap -o IdentitiesOnly=yes -o UserKnownHostsFile=$KEYS/known_hosts"
+          git clone --depth 1 "git@github.com:$OWNER/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          CURRENT=$(sed -nE 's/^  version "([^"]+)"$/\1/p' tap/Casks/clean-my-mac.rb 2>/dev/null || true)
+          if [ -n "$CURRENT" ] && [ "$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -1)" != "$VERSION" ]; then
+            echo "::warning::The tap already has clean-my-mac $CURRENT, newer than $VERSION; leaving it"
+            exit 0
+          fi
+          printf '%s' "$CASK" | base64 --decode > tap/Casks/clean-my-mac.rb
+          ruby -c tap/Casks/clean-my-mac.rb
+          cd tap
+          git config user.name "$AUTHOR_NAME"
+          git config user.email "$AUTHOR_EMAIL"
+          git add Casks/clean-my-mac.rb
+          if git diff --cached --quiet; then
+            echo "Cask already up to date"
+            exit 0
+          fi
+          git commit -m "clean-my-mac $VERSION"
+          for attempt in 1 2 3 4 5; do
+            git push && exit 0
+            sleep $((attempt * 10))
+            git pull --rebase
+          done
+          exit 1

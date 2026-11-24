@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  TURBO_TELEMETRY_DISABLED: "1"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+jobs:
+  check:
+    name: Rust and frontend
+    # Same default as the release workflow; set the CI_RUNNER repository variable to change it.
+    runs-on: ${{ vars.CI_RUNNER || 'macos-26-intel' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install JavaScript dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Lint (Biome)
+        run: corepack pnpm -w lint
+
+      - name: Typecheck
+        run: corepack pnpm -w typecheck
+
+      # Also needed by cargo below: the desktop crate embeds apps/desktop/dist.
+      - name: Build the frontend
+        run: corepack pnpm -w build
+
+      - name: Frontend tests (Vitest)
+        run: corepack pnpm --filter desktop test
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --workspace --locked
+
+      # `cargo test` regenerates the ts-rs bindings; they must match what is committed.
+      - name: TypeScript bindings are up to date
+        run: |
+          if [ -n "$(git status --porcelain -- apps/desktop/src/bindings)" ]; then
+            git status --short -- apps/desktop/src/bindings
+            git diff -- apps/desktop/src/bindings
+            echo "::error::Regenerate the bindings (cargo test -p cmm-core export_bindings) and commit them"
+            exit 1
+          fi
+
+  packaging:
+    name: Scripts, workflows and cask
+    runs-on: ${{ vars.CI_RUNNER || 'macos-26-intel' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install shellcheck and actionlint
+        run: brew install shellcheck actionlint
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+      - name: actionlint
+        run: actionlint
+
+      - name: Versions agree
+        run: scripts/check-version.sh "$(scripts/check-version.sh --print)"
+
+      # The release workflow renders the same template with the real version and checksum.
+      - name: Render and lint the cask
+        run: |
+          VERSION=$(scripts/check-version.sh --print)
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          CASK="$RUNNER_TEMP/tap/Casks/clean-my-mac.rb"
+          scripts/render-cask.sh --version "${VERSION%%-*}" --sha256 "$(printf '0%.0s' {1..64})" > "$CASK"
+          ruby -c "$CASK"
+          brew style "$CASK"
