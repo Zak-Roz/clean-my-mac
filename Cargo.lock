@@ -443,10 +443,13 @@ name = "cmm-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "cmm-core",
+ "rayon",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
