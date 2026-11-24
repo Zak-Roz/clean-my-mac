@@ -477,6 +477,7 @@ dependencies = [
 name = "cmm-desktop"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "cmm-core",
  "serde",
  "serde_json",

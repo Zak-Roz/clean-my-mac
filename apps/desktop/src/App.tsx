@@ -7,9 +7,16 @@ import { ConfirmDialog } from "./screens/ConfirmDialog";
 import { Findings } from "./screens/Findings";
 import { History } from "./screens/History";
 import { Overview } from "./screens/Overview";
+import { Settings } from "./screens/Settings";
 import { AppProvider, type Screen, useApp } from "./state";
 
-const SHORTCUTS: Record<string, Screen> = { "1": "overview", "2": "findings", "3": "history" };
+const SHORTCUTS: Record<string, Screen> = {
+  "1": "overview",
+  "2": "findings",
+  "3": "history",
+  "4": "settings",
+  ",": "settings",
+};
 
 function Shell() {
   const { screen, setScreen } = useApp();
@@ -32,6 +39,7 @@ function Shell() {
       {screen === "overview" && <Overview />}
       {screen === "findings" && <Findings />}
       {screen === "history" && <History />}
+      {screen === "settings" && <Settings />}
       <ConfirmDialog />
     </div>
   );

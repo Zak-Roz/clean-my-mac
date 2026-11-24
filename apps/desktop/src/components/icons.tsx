@@ -31,6 +31,14 @@ export const GaugeIcon = (p: IconProps) => (
   </Icon>
 );
 
+export const SlidersIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M2.5 4.5h3.4M9.1 4.5h4.4M2.5 11.5h6.4M12.1 11.5h1.4" />
+    <circle cx="7.5" cy="4.5" r="1.6" />
+    <circle cx="10.5" cy="11.5" r="1.6" />
+  </Icon>
+);
+
 export const ListIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M5.5 4h8M5.5 8h8M5.5 12h8" />

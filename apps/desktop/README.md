@@ -11,7 +11,12 @@ corepack pnpm --filter desktop screenshots   # with dev:mock running: regenerate
 
 ## Layout
 
-- `src-tauri/src/commands.rs` — the §7 commands over `cmm-core` plus `reveal_trash`; blocking work on
+- `src-tauri/src/tray.rs` — the menu bar item: free space as its title (one `statfs` a minute), a
+  gauge icon that turns orange below `low_space_threshold_bytes`, and a menu with Open, Scan Now, the
+  last scan and the top growth of the last `growth_alert_days` (history re-read every 10 min and after
+  each scan/clean). Closing the window hides it; Quit is in the menu bar menu or ⌘Q.
+- `src-tauri/src/commands.rs` — the §7 commands over `cmm-core` plus `reveal_trash`, `monitor_settings`
+  and `agent_status` / `agent_install` / `agent_uninstall` (Settings toggle only); blocking work on
   `spawn_blocking`, history opened lazily at `data_dir/history.sqlite` (full scans only), the last
   full scan persisted to `data_dir/last-report.json` and loaded at startup, core errors returned as
   readable strings.
@@ -19,8 +24,23 @@ corepack pnpm --filter desktop screenshots   # with dev:mock running: regenerate
   progress, plan/execute with one blocked and one failing item, ~90 days of synthetic history).
 - `src/state.tsx` — app state (volume, report, progress, selection) behind `useApp()`.
 - `src/lib/` — pure logic: risk/selection rules, nested-path de-duplication, grouping, formatting.
-- `src/screens/` — Overview, Findings (+ selection bar), Confirm sheet, History.
+- `src/screens/` — Overview, Findings (+ selection bar), Confirm sheet, History, Settings.
 - `src/components/` — window chrome, small UI primitives, hand-rolled SVG charts.
+
+## Passive monitoring
+
+The daily background scan is a user LaunchAgent (`~/Library/LaunchAgents/com.zak-roz.clean-my-mac.scan.plist`)
+running `cmm scan --quiet --notify` at 10:00: it records the scan to history and posts a notification when
+free space is below the threshold or one item grew more than `growth_alert_bytes` in `growth_alert_days`.
+It never cleans. It is installed only on request — the Settings switch or:
+
+```bash
+cargo install --path crates/cmm-cli      # a stable cmm path for the job (~/.cargo/bin/cmm)
+cmm agent install [--at 10:00]          # also: cmm agent status, cmm agent uninstall
+```
+
+Thresholds live in `data_dir/config.toml` (`low_space_threshold_bytes`, `growth_alert_bytes`,
+`growth_alert_days`, `notifications`); Settings shows them.
 
 ## Stack
 

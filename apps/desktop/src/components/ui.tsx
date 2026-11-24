@@ -205,6 +205,41 @@ export function Segmented<T extends string | number>({
   );
 }
 
+/** macOS-style on/off switch. */
+export function Switch({
+  checked,
+  disabled,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={cx(
+        "relative inline-flex h-[22px] w-[38px] shrink-0 items-center rounded-full transition-colors disabled:opacity-45",
+        checked ? "bg-accent" : "bg-surface-3 shadow-[inset_0_0_0_1px_var(--line-strong)]",
+      )}
+    >
+      <span
+        className={cx(
+          "absolute left-[2px] size-[18px] rounded-full bg-white shadow-[0_1px_2px_rgb(0_0_0/0.25)] transition-transform",
+          checked ? "translate-x-[16px]" : "translate-x-0",
+        )}
+      />
+    </button>
+  );
+}
+
 /** Native checkbox with tri-state support. */
 export function Checkbox({
   checked,

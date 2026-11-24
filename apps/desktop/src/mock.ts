@@ -6,10 +6,12 @@
 //   time the leftover worktree folder has become a real worktree and is skipped, the Docker prune
 //   fails, the rest succeed; cleaned findings disappear from later scans;
 // - history returns ~90 days of synthetic free-space points and growth rows;
-// - "Open Settings" for Full Disk Access grants it, so the Trash size appears on the next check.
+// - "Open Settings" for Full Disk Access grants it, so the Trash size appears on the next check;
+// - the background-scan toggle installs/uninstalls a pretend LaunchAgent (nothing touches launchd).
 
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { Api } from "./api";
+import type { AgentStatus } from "./bindings/AgentStatus";
 import type { CleanItemResult } from "./bindings/CleanItemResult";
 import type { CleanPlan } from "./bindings/CleanPlan";
 import type { CleanRequest } from "./bindings/CleanRequest";
@@ -72,6 +74,24 @@ export function createMockApi(): Api {
   let lastReport: ScanReport | null = null;
   let volume: VolumeInfo | null = null;
   let fullDiskAccess = false;
+  let agentInstalled = false;
+
+  function agentStatus(): AgentStatus {
+    const dataDir = "/Users/you/Library/Application Support/clean-my-mac";
+    return {
+      installed: agentInstalled,
+      loaded: agentInstalled,
+      plistPath: "/Users/you/Library/LaunchAgents/com.zak-roz.clean-my-mac.scan.plist",
+      program: agentInstalled ? "/Users/you/.cargo/bin/cmm" : null,
+      programOk: agentInstalled,
+      hour: agentInstalled ? 10 : null,
+      minute: agentInstalled ? 0 : null,
+      logPath: `${dataDir}/agent.log`,
+      lastExitCode: null,
+      lastLogLine: null,
+      resolvedCmm: "/Users/you/.cargo/bin/cmm",
+    };
+  }
 
   async function currentVolume(): Promise<VolumeInfo> {
     if (!volume) volume = { ...(await loadFixture()).volume };
@@ -204,6 +224,27 @@ export function createMockApi(): Api {
       console.info("[mock] open Full Disk Access settings (granting it)");
       fullDiskAccess = true;
     },
+    monitorSettings: async () => ({
+      lowSpaceThresholdBytes: 50 * GB,
+      growthAlertBytes: 5 * GB,
+      growthAlertDays: 7,
+      notifications: true,
+      configPath: "/Users/you/Library/Application Support/clean-my-mac/config.toml",
+    }),
+    agentStatus: async () => agentStatus(),
+    agentInstall: async () => {
+      await sleep(400);
+      agentInstalled = true;
+      return agentStatus();
+    },
+    agentUninstall: async () => {
+      await sleep(300);
+      agentInstalled = false;
+      return agentStatus();
+    },
+    // No menu bar in the browser.
+    onExternalScan: async () => () => {},
+    onNavigate: async () => () => {},
     // Each registration gets its own wrapper so registering the same function twice (React
     // StrictMode effects) and unlistening once leaves the other registration intact, like Tauri.
     onScanProgress: async (handler) => {

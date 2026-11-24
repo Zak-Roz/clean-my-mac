@@ -1,5 +1,10 @@
 //! Tauri commands (ARCHITECTURE.md §7). All async, errors as readable `String`s.
-//! Events: "scan://progress" (ScanProgress), "clean://item" (CleanItemResult).
+//! Events: "scan://progress" (ScanProgress), "clean://item" (CleanItemResult); scans started from
+//! the menu bar also emit "scan://started", "scan://finished" (ScanReport) or "scan://failed"
+//! (see `tray.rs`).
+//!
+//! The daily background scan (LaunchAgent) is installed and removed only through `agent_install` /
+//! `agent_uninstall`, i.e. when the user flips the Settings toggle — never automatically.
 //!
 //! The last full scan is persisted to `data_dir/last-report.json` (contract v2): written after each
 //! full scan and after a real clean prunes it, loaded at startup; a missing or unreadable file just
@@ -20,12 +25,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cmm_core::actions::{self, CleanPlan};
+use cmm_core::agent::{self, AgentSpec, AgentStatus, SystemLaunchd};
 use cmm_core::config::home_dir;
 use cmm_core::history::History;
 use cmm_core::model::{
     CleanItemResult, CleanOutcome, CleanRequest, CleanResult, FreeSpacePoint, GrowthItem, RuleDef, ScanOptions,
     ScanReport, VolumeInfo,
 };
+use cmm_core::monitor::MonitorSettings;
 use cmm_core::{Config, CoreError, rules, volume};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -78,7 +85,7 @@ impl AppState {
 
     /// Runs `f` with the history database, opening it first if needed. Blocking: call from a
     /// blocking thread.
-    fn with_history<T>(&self, f: impl FnOnce(&History) -> Result<T, CoreError>) -> Result<T, String> {
+    pub(crate) fn with_history<T>(&self, f: impl FnOnce(&History) -> Result<T, CoreError>) -> Result<T, String> {
         let mut slot = self.history.lock().map_err(|e| e.to_string())?;
         if slot.is_none() {
             let path = self.history_path();
@@ -93,6 +100,10 @@ impl AppState {
 
     fn last_report_clone(&self) -> Result<Option<ScanReport>, String> {
         Ok(self.last_report.lock().map_err(|e| e.to_string())?.clone())
+    }
+
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.scanning.load(Ordering::SeqCst)
     }
 }
 
@@ -195,16 +206,28 @@ pub async fn list_rules(state: State<'_, AppState>) -> Result<Vec<RuleDef>, Stri
 
 #[tauri::command]
 pub async fn start_scan(app: AppHandle, opts: ScanOptions) -> Result<ScanReport, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || run_scan(&app, &opts)).await.map_err(join_err)?
+}
+
+/// A full scan, as the menu bar's "Scan Now" runs it. Blocking.
+pub(crate) fn run_full_scan(app: &AppHandle) -> Result<ScanReport, String> {
+    run_scan(app, &ScanOptions::default())
+}
+
+/// Scans with progress events, records full scans to history, keeps the report and refreshes the
+/// menu bar. Blocking: call from a blocking thread.
+fn run_scan(app: &AppHandle, opts: &ScanOptions) -> Result<ScanReport, String> {
+    let result = (|| {
         let state = app.state::<AppState>();
         let _busy = BusyGuard::acquire(&state.scanning, "a scan")?;
+        crate::tray::refresh(app, false); // "Scanning…"
         let rules = state.load_rules()?;
-        let report = cmm_core::scan(&rules, &opts, &state.config, &|progress| {
+        let report = cmm_core::scan(&rules, opts, &state.config, &|progress| {
             let _ = app.emit(SCAN_PROGRESS_EVENT, progress);
         });
         // History compares whole scans, so only unfiltered ones are recorded (contract v2). It is
         // a nice-to-have: a failure here must not lose the scan.
-        if cmm_core::scan::is_full_scan(&opts) {
+        if cmm_core::scan::is_full_scan(opts) {
             if let Err(e) = state.with_history(|h| h.record_scan(&report)) {
                 eprintln!("cmm: scan not recorded to history: {e}");
             }
@@ -212,9 +235,9 @@ pub async fn start_scan(app: AppHandle, opts: ScanOptions) -> Result<ScanReport,
         }
         *state.last_report.lock().map_err(|e| e.to_string())? = Some(report.clone());
         Ok(report)
-    })
-    .await
-    .map_err(join_err)?
+    })();
+    crate::tray::refresh(app, true);
+    result
 }
 
 #[tauri::command]
@@ -265,6 +288,9 @@ pub async fn execute_clean(app: AppHandle, req: CleanRequest) -> Result<CleanRes
             prune_cleaned(stored, &result);
             state.persist_report(stored);
         }
+        if !result.dry_run {
+            crate::tray::refresh(&app, false);
+        }
         Ok(result)
     })
     .await
@@ -311,6 +337,63 @@ pub async fn reveal_trash() -> Result<(), String> {
 #[tauri::command]
 pub async fn open_full_disk_access_settings() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| run_open(&[FULL_DISK_ACCESS_URL.as_ref()])).await.map_err(join_err)?
+}
+
+/// Thresholds for the menu bar warning and the background scan's notifications.
+#[tauri::command]
+pub async fn monitor_settings(state: State<'_, AppState>) -> Result<MonitorSettings, String> {
+    Ok(MonitorSettings::from(&state.config))
+}
+
+/// The `cmm` binary the agent would run: a `cmm` bundled next to the app, the usual install
+/// locations, then `$PATH` (a Finder-launched app has a minimal `PATH`). Verified with `--version`.
+fn resolve_cmm(home: &Path) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    agent::find_cmm(home, exe.as_deref(), std::env::var_os("PATH").as_deref())
+}
+
+fn agent_status_now(config: &Config) -> AgentStatus {
+    let home = home_dir();
+    let mut status = agent::status(&home, config, &SystemLaunchd);
+    status.resolved_cmm = resolve_cmm(&home).map(|p| p.to_string_lossy().into_owned());
+    status
+}
+
+/// The message shown when no `cmm` binary can be found for the background scan.
+const CMM_NOT_FOUND: &str = "The cmm command-line tool was not found (looked next to the app, in ~/.cargo/bin, \
+~/.local/bin, /opt/homebrew/bin, /usr/local/bin and PATH). Install it with `cargo install --path crates/cmm-cli`, \
+then try again.";
+
+#[tauri::command]
+pub async fn agent_status(app: AppHandle) -> Result<AgentStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(agent_status_now(&app.state::<AppState>().config)))
+        .await
+        .map_err(join_err)?
+}
+
+/// Installs the daily background scan. Only ever called from the Settings toggle.
+#[tauri::command]
+pub async fn agent_install(app: AppHandle) -> Result<AgentStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = &app.state::<AppState>().config;
+        let home = home_dir();
+        let cmm = resolve_cmm(&home).ok_or(CMM_NOT_FOUND)?;
+        agent::install(&AgentSpec::new(cmm, config), &home, config, &SystemLaunchd).map_err(core_err)?;
+        Ok(agent_status_now(config))
+    })
+    .await
+    .map_err(join_err)?
+}
+
+#[tauri::command]
+pub async fn agent_uninstall(app: AppHandle) -> Result<AgentStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = &app.state::<AppState>().config;
+        agent::uninstall(&home_dir(), &SystemLaunchd).map_err(core_err)?;
+        Ok(agent_status_now(config))
+    })
+    .await
+    .map_err(join_err)?
 }
 
 #[cfg(test)]

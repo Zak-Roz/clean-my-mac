@@ -10,7 +10,13 @@ import type { VolumeInfo } from "./bindings/VolumeInfo";
 import { defaultSelection } from "./lib/findings";
 import { errorMessage } from "./lib/format";
 
-export type Screen = "overview" | "findings" | "history";
+export type Screen = "overview" | "findings" | "history" | "settings";
+
+const SCREENS: readonly string[] = ["overview", "findings", "history", "settings"] satisfies Screen[];
+
+function isScreen(value: string): value is Screen {
+  return SCREENS.includes(value);
+}
 
 interface AppState {
   screen: Screen;
@@ -75,12 +81,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
       () => {},
     );
     const unlisten = api.onScanProgress(setProgress);
+    // "Scan Now" in the menu bar runs the same scan in the backend; mirror it here.
+    const unlistenExternal = api.onExternalScan((event) => {
+      if (event.kind === "started") {
+        setScanning(true);
+        setScanError(null);
+        setProgress(null);
+        return;
+      }
+      setScanning(false);
+      setProgress(null);
+      if (event.kind === "failed") {
+        setScanError(event.message);
+        return;
+      }
+      setReport(event.report);
+      setVolume(event.report.volume);
+      setSelection(defaultSelection(event.report.findings));
+      setDataVersion((v) => v + 1);
+    });
+    // Growth lines in the menu bar open History.
+    const unlistenNavigate = api.onNavigate((target) => {
+      if (isScreen(target)) setScreen(target);
+    });
     // Coming back from System Settings (Full Disk Access) or Finder (emptied Trash): re-read.
     const onFocus = () => refreshVolume();
     window.addEventListener("focus", onFocus);
     return () => {
       window.removeEventListener("focus", onFocus);
-      unlisten.then((stop) => stop());
+      for (const stop of [unlisten, unlistenExternal, unlistenNavigate]) stop.then((fn) => fn());
     };
   }, [refreshVolume]);
 
