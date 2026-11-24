@@ -118,7 +118,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const applyCleanResult = useCallback(
     async (result: CleanResult) => {
       if (result.dryRun) return;
-      const done = new Set(result.items.filter((i) => i.ok).map((i) => i.findingId));
+      const done = new Set(result.items.filter((i) => i.outcome === "done").map((i) => i.findingId));
       setSelection((prev) => new Set([...prev].filter((id) => !done.has(id))));
       // The backend drops cleaned findings from its stored report; mirror that.
       let next: ScanReport | null = null;

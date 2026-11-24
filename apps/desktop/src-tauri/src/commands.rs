@@ -14,8 +14,8 @@ use cmm_core::actions::{self, CleanPlan};
 use cmm_core::config::home_dir;
 use cmm_core::history::History;
 use cmm_core::model::{
-    CleanItemResult, CleanRequest, CleanResult, FreeSpacePoint, GrowthItem, RuleDef, ScanOptions, ScanReport,
-    VolumeInfo,
+    CleanItemResult, CleanOutcome, CleanRequest, CleanResult, FreeSpacePoint, GrowthItem, RuleDef, ScanOptions,
+    ScanReport, VolumeInfo,
 };
 use cmm_core::{Config, CoreError, rules, volume};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -107,7 +107,7 @@ fn prune_cleaned(report: &mut ScanReport, result: &CleanResult) {
         return;
     }
     let done: std::collections::HashSet<&str> =
-        result.items.iter().filter(|i| i.ok).map(|i| i.finding_id.as_str()).collect();
+        result.items.iter().filter(|i| i.outcome == CleanOutcome::Done).map(|i| i.finding_id.as_str()).collect();
     report.findings.retain(|f| !done.contains(f.id.as_str()));
 }
 
@@ -244,8 +244,8 @@ mod tests {
         serde_json::from_str(include_str!("../../../../fixtures/sample-report.json")).unwrap()
     }
 
-    fn item(id: &str, ok: bool) -> CleanItemResult {
-        CleanItemResult { finding_id: id.into(), ok, bytes: 1, message: None }
+    fn item(id: &str, outcome: CleanOutcome) -> CleanItemResult {
+        CleanItemResult { finding_id: id.into(), outcome, bytes: 1, message: None }
     }
 
     #[test]
@@ -257,7 +257,7 @@ mod tests {
         let result = CleanResult {
             dry_run: false,
             mode: CleanMode::Trash,
-            items: vec![item(&first, true), item(&second, false)],
+            items: vec![item(&first, CleanOutcome::Done), item(&second, CleanOutcome::Failed)],
             freed_bytes: 0,
             moved_to_trash_bytes: 1,
         };
@@ -275,7 +275,7 @@ mod tests {
         let result = CleanResult {
             dry_run: true,
             mode: CleanMode::Trash,
-            items: vec![item(&id, true)],
+            items: vec![item(&id, CleanOutcome::Done)],
             freed_bytes: 0,
             moved_to_trash_bytes: 0,
         };

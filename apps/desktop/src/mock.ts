@@ -15,6 +15,7 @@ import type { CleanResult } from "./bindings/CleanResult";
 import type { Finding } from "./bindings/Finding";
 import type { FreeSpacePoint } from "./bindings/FreeSpacePoint";
 import type { GrowthItem } from "./bindings/GrowthItem";
+import type { GrowthKind } from "./bindings/GrowthKind";
 import type { ScanProgress } from "./bindings/ScanProgress";
 import type { ScanReport } from "./bindings/ScanReport";
 import type { VolumeInfo } from "./bindings/VolumeInfo";
@@ -142,13 +143,13 @@ export function createMockApi(): Api {
         const { blocked, fails } = revalidate(f);
         let result: CleanItemResult;
         if (covered.has(f.id)) {
-          result = { findingId: f.id, ok: true, bytes: 0, message: "Covered by parent" };
+          result = { findingId: f.id, outcome: "done", bytes: 0, message: "Covered by parent" };
         } else if (blocked) {
-          result = { findingId: f.id, ok: false, bytes: 0, message: `Skipped: ${blocked}` };
+          result = { findingId: f.id, outcome: "skipped", bytes: 0, message: `Skipped: ${blocked}` };
         } else if (fails && !req.dryRun) {
-          result = { findingId: f.id, ok: false, bytes: 0, message: `docker system prune failed: ${fails}` };
+          result = { findingId: f.id, outcome: "failed", bytes: 0, message: `docker system prune failed: ${fails}` };
         } else {
-          result = { findingId: f.id, ok: true, bytes: f.bytes, message: null };
+          result = { findingId: f.id, outcome: "done", bytes: f.bytes, message: null };
           if (!req.dryRun) {
             if (req.mode === "delete" || isPermanentAction(f)) freedBytes += f.bytes;
             else movedToTrashBytes += f.bytes;
@@ -158,7 +159,7 @@ export function createMockApi(): Api {
         for (const h of itemHandlers) h(result);
       }
       if (!req.dryRun) {
-        for (const r of results) if (r.ok) cleaned.add(r.findingId);
+        for (const r of results) if (r.outcome === "done") cleaned.add(r.findingId);
         if (lastReport) lastReport = { ...lastReport, findings: lastReport.findings.filter((f) => !cleaned.has(f.id)) };
         const vol = await currentVolume();
         volume = {
@@ -234,47 +235,69 @@ function syntheticFreeSpace(days: number, currentFree: number): FreeSpacePoint[]
   return points;
 }
 
-const GROWTH: { key: string; label: string; now: number; perDay: number }[] = [
-  { key: "downloads.versioned-siblings", label: "Dated copies in Downloads", now: 114.29 * GB, perDay: 1.27 * GB },
-  { key: "ai.claude-desktop.vm-bundles", label: "Claude Desktop VM bundle", now: 15.67 * GB, perDay: 0.25 * GB },
-  { key: "dev.git-worktrees", label: "Git worktrees", now: 6.62 * GB, perDay: 0.2 * GB },
-  { key: "containers.docker", label: "Docker reclaimable data", now: 11.54 * GB, perDay: 0.16 * GB },
-  { key: "cache.npm", label: "npm cache", now: 7.3 * GB, perDay: 0.08 * GB },
-  { key: "cache.yarn", label: "Yarn cache", now: 4.83 * GB, perDay: -0.04 * GB },
-  { key: "xcode.derived-data", label: "Xcode DerivedData", now: 0, perDay: -0.27 * GB },
+const GROWTH: { kind: GrowthKind; key: string; label: string; now: number; perDay: number }[] = [
   {
+    kind: "rule",
+    key: "downloads.versioned-siblings",
+    label: "Dated copies in Downloads",
+    now: 114.29 * GB,
+    perDay: 1.27 * GB,
+  },
+  {
+    kind: "rule",
+    key: "ai.claude-desktop.vm-bundles",
+    label: "Claude Desktop VM bundle",
+    now: 15.67 * GB,
+    perDay: 0.25 * GB,
+  },
+  { kind: "rule", key: "dev.git-worktrees", label: "Git worktrees", now: 6.62 * GB, perDay: 0.2 * GB },
+  { kind: "rule", key: "containers.docker", label: "Docker reclaimable data", now: 11.54 * GB, perDay: 0.16 * GB },
+  { kind: "rule", key: "cache.npm", label: "npm cache", now: 7.3 * GB, perDay: 0.08 * GB },
+  { kind: "rule", key: "cache.yarn", label: "Yarn cache", now: 4.83 * GB, perDay: -0.04 * GB },
+  { kind: "rule", key: "xcode.derived-data", label: "Xcode DerivedData", now: 0, perDay: -0.27 * GB },
+  {
+    kind: "item",
     key: "downloads.versioned-siblings:/Users/you/Downloads/backups/mongo_17_05_2025",
     label: "mongo_17_05_2025",
     now: 31.47 * GB,
     perDay: 1.05 * GB,
   },
   {
+    kind: "item",
     key: "ai.claude-desktop.vm-bundles:/Users/you/Library/Application Support/ai-profiles/profiles/3f9c2d41-7b6e-4c1a-9e85-2d0f6a7b1c93/gui-data/vm_bundles",
     label: "vm_bundles (profile 3f9c2d41)",
     now: 8.71 * GB,
     perDay: 0.27 * GB,
   },
   {
+    kind: "item",
     key: "dev.git-worktrees:/Users/you/Developer/example-app/.claude/worktrees/bugfix-123",
     label: "bugfix-123",
     now: 2.19 * GB,
     perDay: 0.1 * GB,
   },
   {
+    kind: "item",
     key: "dev.git-worktrees:/Users/you/Developer/example-app/.claude/worktrees/feature-login",
     label: "feature-login",
     now: 2.68 * GB,
     perDay: 0.06 * GB,
   },
-  { key: "cache.npm:/Users/you/.npm/_cacache", label: "npm cache", now: 7.3 * GB, perDay: 0.08 * GB },
-  { key: "cache.yarn:/Users/you/Library/Caches/Yarn", label: "Yarn cache", now: 4.83 * GB, perDay: -0.04 * GB },
+  { kind: "item", key: "cache.npm:/Users/you/.npm/_cacache", label: "npm cache", now: 7.3 * GB, perDay: 0.08 * GB },
+  {
+    kind: "item",
+    key: "cache.yarn:/Users/you/Library/Caches/Yarn",
+    label: "Yarn cache",
+    now: 4.83 * GB,
+    perDay: -0.04 * GB,
+  },
 ];
 
 function syntheticGrowth(days: number): GrowthItem[] {
-  return GROWTH.map(({ key, label, now, perDay }) => {
+  return GROWTH.map(({ kind, key, label, now, perDay }) => {
     const bytesThen = Math.max(0, Math.round(now - perDay * days));
     const bytesNow = Math.round(now);
-    return { key, label, bytesThen, bytesNow, delta: bytesNow - bytesThen };
+    return { kind, key, label, bytesThen, bytesNow, delta: bytesNow - bytesThen };
   })
     .filter((g) => g.delta !== 0)
     .sort((a, b) => b.delta - a.delta);

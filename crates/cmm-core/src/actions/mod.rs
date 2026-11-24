@@ -20,7 +20,9 @@ use crate::config::{Config, home_dir};
 use crate::error::CoreError;
 use crate::guard::{self, canonical_entry, is_within, same_path};
 use crate::history::History;
-use crate::model::{ActionKind, CleanItemResult, CleanMode, CleanRequest, CleanResult, Finding, RuleDef, ScanReport};
+use crate::model::{
+    ActionKind, CleanItemResult, CleanMode, CleanOutcome, CleanRequest, CleanResult, Finding, RuleDef, ScanReport,
+};
 use crate::process::ProcessSnapshot;
 use crate::rules::{expand_roots, load_rules};
 
@@ -129,8 +131,9 @@ pub fn execute(
 
 /// [`execute`] with explicit live-system dependencies.
 ///
-/// Result items: first the excluded ids (`ok: false`, "skipped: …"), then the acted-on items in plan
-/// order, then covered children (`ok` mirrors their parent, `bytes: 0`). When not a dry run, every
+/// Result items: first the excluded ids (`Skipped`, "skipped: …"), then the acted-on items in plan
+/// order (`Done` or `Failed`), then covered children (`Done` with `bytes: 0` when an ancestor was
+/// done, otherwise tried on their own). When not a dry run, every
 /// acted-on item (including re-validation failures) is written to the history audit log.
 /// `dry_run` performs every read-only check but changes nothing (no history write either).
 pub fn execute_with(
@@ -156,7 +159,7 @@ pub fn execute_with(
     for s in &sel.skipped {
         let item = CleanItemResult {
             finding_id: s.id.clone(),
-            ok: false,
+            outcome: CleanOutcome::Skipped,
             bytes: 0,
             message: Some(format!("skipped: {}", s.reason)),
         };
@@ -173,9 +176,19 @@ pub fn execute_with(
                     Op::Trash => result.moved_to_trash_bytes += f.bytes,
                     Op::Delete | Op::GitWorktreeRemove | Op::Command => result.freed_bytes += f.bytes,
                 }
-                CleanItemResult { finding_id: f.id.clone(), ok: true, bytes: f.bytes, message: Some(done.message) }
+                CleanItemResult {
+                    finding_id: f.id.clone(),
+                    outcome: CleanOutcome::Done,
+                    bytes: f.bytes,
+                    message: Some(done.message),
+                }
             }
-            Err(why) => CleanItemResult { finding_id: f.id.clone(), ok: false, bytes: 0, message: Some(why) },
+            Err(why) => CleanItemResult {
+                finding_id: f.id.clone(),
+                outcome: CleanOutcome::Failed,
+                bytes: 0,
+                message: Some(why),
+            },
         };
         if !req.dry_run
             && let Some(h) = history
@@ -189,7 +202,7 @@ pub fn execute_with(
 
     for f in &sel.act {
         let item = act_one(f, &mut result);
-        acted.push((f, item.ok));
+        acted.push((f, item.outcome == CleanOutcome::Done));
         emit(item, &mut result);
     }
 
@@ -201,13 +214,13 @@ pub fn execute_with(
         let item = match done_by {
             Some((ancestor, _)) => CleanItemResult {
                 finding_id: child.id.clone(),
-                ok: true,
+                outcome: CleanOutcome::Done,
                 bytes: 0,
                 message: Some(format!("included in {}", ancestor.label)),
             },
             None => {
                 let item = act_one(child, &mut result);
-                acted.push((child, item.ok));
+                acted.push((child, item.outcome == CleanOutcome::Done));
                 item
             }
         };

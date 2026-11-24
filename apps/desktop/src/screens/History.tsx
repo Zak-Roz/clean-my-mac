@@ -1,34 +1,26 @@
 import { useState } from "react";
 import { api } from "../api";
+import type { Finding } from "../bindings/Finding";
 import type { FreeSpacePoint } from "../bindings/FreeSpacePoint";
 import type { GrowthItem } from "../bindings/GrowthItem";
 import { DeltaBar, FreeSpaceChart } from "../components/charts";
 import { ScreenFrame } from "../components/layout";
 import { Button, Callout, Card, CardHeader, cx, Segmented } from "../components/ui";
-import {
-  formatBytes,
-  formatDate,
-  formatDateTime,
-  formatDelta,
-  isNotImplemented,
-  stubDetail,
-  tildify,
-} from "../lib/format";
+import { formatBytes, formatDate, formatDateTime, formatDelta, isNotImplemented, stubDetail } from "../lib/format";
+import { growthSubtitle, splitGrowth } from "../lib/growth";
 import { useApp, useAsync } from "../state";
 
 const RANGES = [7, 30, 90] as const;
 type Range = (typeof RANGES)[number];
 
 export function History() {
-  const { dataVersion } = useApp();
+  const { dataVersion, report } = useApp();
   const [days, setDays] = useState<Range>(30);
   const trend = useAsync(() => api.historyFreeSpace(days), [days, dataVersion]);
   const growth = useAsync(() => api.historyGrowth(days), [days, dataVersion]);
   const error = trend.error ?? growth.error;
 
-  // GrowthItem rows mix rules ("cache.npm") and findings ("cache.npm:/path"): finding ids contain ':'.
-  const byRule = (growth.data ?? []).filter((g) => !g.key.includes(":"));
-  const byItem = (growth.data ?? []).filter((g) => g.key.includes(":"));
+  const { byRule, byItem } = splitGrowth(growth.data ?? []);
 
   return (
     <ScreenFrame
@@ -57,7 +49,12 @@ export function History() {
           <>
             <FreeSpaceCard points={trend.data ?? []} days={days} />
             <GrowthTable title="Growth by rule" rows={byRule} loading={growth.data === null} />
-            <GrowthTable title="Growth by item" rows={byItem} loading={growth.data === null} showPath />
+            <GrowthTable
+              title="Growth by item"
+              rows={byItem}
+              loading={growth.data === null}
+              findings={report?.findings}
+            />
           </>
         )}
       </div>
@@ -133,12 +130,13 @@ function GrowthTable({
   title,
   rows,
   loading,
-  showPath = false,
+  findings,
 }: {
   title: string;
   rows: GrowthItem[];
   loading: boolean;
-  showPath?: boolean;
+  /** Current report findings, to show an item's path. */
+  findings?: readonly Finding[];
 }) {
   const [expanded, setExpanded] = useState(false);
   const shown = expanded ? rows : rows.slice(0, 8);
@@ -175,13 +173,13 @@ function GrowthTable({
             </thead>
             <tbody className="divide-y divide-line">
               {shown.map((g) => {
-                const path = showPath && g.key.includes(":") ? g.key.slice(g.key.indexOf(":") + 1) : null;
+                const sub = growthSubtitle(g, findings);
                 return (
                   <tr key={g.key}>
                     <td className="py-1.5 pr-3">
                       <div className="truncate">{g.label}</div>
-                      <div className="selectable truncate text-[11px] text-fg-3" title={path ?? g.key}>
-                        {path ? tildify(path) : g.key}
+                      <div className="selectable truncate text-[11px] text-fg-3" title={sub.title}>
+                        {sub.text}
                       </div>
                     </td>
                     <td className="py-1.5 text-right text-fg-2 tabular-nums">

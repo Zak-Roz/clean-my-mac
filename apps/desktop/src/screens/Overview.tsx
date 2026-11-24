@@ -7,7 +7,8 @@ import { InfoIcon, LockIcon, MemoryIcon, SparkIcon, TrashIcon } from "../compone
 import { lastScanLine, ScanButton, ScreenFrame } from "../components/layout";
 import { Button, Callout, Card, CardHeader, cx, StatusPill, Tip } from "../components/ui";
 import { dedupedTotal, isSelectable } from "../lib/findings";
-import { errorMessage, formatBytes, formatDelta, isNotImplemented, stubDetail, tildify } from "../lib/format";
+import { errorMessage, formatBytes, formatDelta, isNotImplemented, stubDetail } from "../lib/format";
+import { growthSubtitle, splitGrowth } from "../lib/growth";
 import { useApp, useAsync } from "../state";
 
 const SWAP_WARNING_BYTES = 10e9;
@@ -266,9 +267,9 @@ function HistoryUnavailable({ message }: { message: string }) {
 }
 
 function TopGrowth({ items, error }: { items: GrowthItem[] | null; error: string | null }) {
-  const { setScreen } = useApp();
+  const { setScreen, report } = useApp();
   const growing = (items ?? []).filter((g) => g.delta > 0);
-  const byItem = growing.filter((g) => g.key.includes(":"));
+  const { byItem } = splitGrowth(growing);
   const rows = (byItem.length > 0 ? byItem : growing).slice(0, 5);
   const max = Math.max(1, ...rows.map((r) => r.delta));
   return (
@@ -294,13 +295,13 @@ function TopGrowth({ items, error }: { items: GrowthItem[] | null; error: string
         ) : (
           <ul className="divide-y divide-line">
             {rows.map((g) => {
-              const path = g.key.includes(":") ? g.key.slice(g.key.indexOf(":") + 1) : null;
+              const sub = growthSubtitle(g, report?.findings);
               return (
                 <li key={g.key} className="grid grid-cols-[minmax(0,1fr)_120px_80px] items-center gap-3 py-2">
                   <div className="min-w-0">
                     <div className="truncate text-[13px]">{g.label}</div>
-                    <div className="selectable truncate text-[11px] text-fg-3" title={path ?? g.key}>
-                      {path ? tildify(path) : g.key}
+                    <div className="selectable truncate text-[11px] text-fg-3" title={sub.title}>
+                      {sub.text}
                     </div>
                   </div>
                   <div className="h-2 rounded-r-[4px] bg-grow" style={{ width: `${(g.delta / max) * 100}%` }} />

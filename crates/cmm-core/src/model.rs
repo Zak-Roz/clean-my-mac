@@ -227,12 +227,25 @@ pub struct CleanRequest {
     pub dry_run: bool,
 }
 
+/// What happened to one requested item (contract v2, replaces `ok: bool`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum CleanOutcome {
+    /// Acted on (or, in a dry run, would be acted on); also a child covered by a done parent.
+    Done,
+    /// Not acted on by design: info-only, blocked, unknown id, nothing to do.
+    Skipped,
+    /// Tried and failed (re-validation, guard, tool error).
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct CleanItemResult {
     pub finding_id: String,
-    pub ok: bool,
+    pub outcome: CleanOutcome,
     pub bytes: u64,
     pub message: Option<String>,
 }
@@ -248,10 +261,22 @@ pub struct CleanResult {
     pub moved_to_trash_bytes: u64,
 }
 
+/// Whether a [`GrowthItem`] sums a whole rule or tracks one finding (contract v2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum GrowthKind {
+    /// `key` is a rule id; the sizes are the sum of that rule's findings.
+    Rule,
+    /// `key` is a finding id.
+    Item,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct GrowthItem {
+    pub kind: GrowthKind,
     pub key: String,
     pub label: String,
     pub bytes_then: u64,

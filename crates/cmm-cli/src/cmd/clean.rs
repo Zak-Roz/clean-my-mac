@@ -11,7 +11,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use cmm_core::actions::{self, CleanPlan};
 use cmm_core::history::{History, action_label};
-use cmm_core::model::{CleanItemResult, CleanMode, CleanRequest, CleanResult, Finding, Risk, ScanOptions, ScanReport};
+use cmm_core::model::{
+    CleanItemResult, CleanMode, CleanOutcome, CleanRequest, CleanResult, Finding, Risk, ScanOptions, ScanReport,
+};
 use cmm_core::{Config, config::home_dir};
 
 use super::{display_path, fmt_bytes, kebab, load_rules};
@@ -85,7 +87,8 @@ pub fn run(args: Args) -> Result<ExitCode> {
     println!();
     let result = actions::execute(&report, &req, history.as_ref(), &|item| print_item(item, &by_id, &home));
     print_summary(&result);
-    Ok(if result.items.iter().all(|i| i.ok) { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+    let failed = result.items.iter().any(|i| i.outcome == CleanOutcome::Failed);
+    Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
 /// The finding ids the flags select, and how many manual-risk findings `--rule` left out.
@@ -133,25 +136,30 @@ fn print_plan(plan: &CleanPlan, mode: CleanMode, dry_run: bool, home: &Path) {
 
 fn print_item(item: &CleanItemResult, by_id: &HashMap<&str, &Finding>, home: &Path) {
     let what = by_id.get(item.finding_id.as_str()).map_or_else(|| item.finding_id.clone(), |f| what(f, home));
-    let status = if item.ok { "ok" } else { "FAIL" };
+    let status = match item.outcome {
+        CleanOutcome::Done => "ok",
+        CleanOutcome::Skipped => "skip",
+        CleanOutcome::Failed => "FAIL",
+    };
     let size = if item.bytes > 0 { fmt_bytes(item.bytes) } else { String::new() };
     let message = item.message.as_deref().unwrap_or("");
     println!("{status:<4}  {size:>10}  {what}  — {message}");
 }
 
 fn print_summary(result: &CleanResult) {
-    let failed = result.items.iter().filter(|i| !i.ok).count();
+    let count = |o: CleanOutcome| result.items.iter().filter(|i| i.outcome == o).count();
+    let (failed, skipped) = (count(CleanOutcome::Failed), count(CleanOutcome::Skipped));
     println!();
     if result.dry_run {
         println!(
-            "Dry run: would move {} to Trash and free {}; {failed} item(s) would fail.",
+            "Dry run: would move {} to Trash and free {}; {failed} item(s) would fail, {skipped} skipped.",
             fmt_bytes(result.moved_to_trash_bytes),
             fmt_bytes(result.freed_bytes),
         );
         println!("Nothing was changed. Re-run with --yes to apply.");
     } else {
         println!(
-            "Moved to Trash: {}   Freed: {}   Failed: {failed}",
+            "Moved to Trash: {}   Freed: {}   Failed: {failed}   Skipped: {skipped}",
             fmt_bytes(result.moved_to_trash_bytes),
             fmt_bytes(result.freed_bytes),
         );

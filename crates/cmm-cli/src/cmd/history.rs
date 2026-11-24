@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 use cmm_core::history::History;
-use cmm_core::model::{FreeSpacePoint, GrowthItem};
+use cmm_core::model::{FreeSpacePoint, GrowthItem, GrowthKind};
 use cmm_core::{Config, config::home_dir};
 
 use super::{display_path, fmt_bytes};
@@ -83,7 +83,7 @@ fn print_growth(growth: &[GrowthItem], window: Option<(DateTime<Utc>, DateTime<U
         return;
     };
     println!("Growth between scans of {} and {}", local(then), local(now));
-    let (rules, items): (Vec<&GrowthItem>, Vec<&GrowthItem>) = growth.iter().partition(|g| g.key.starts_with("rule:"));
+    let (rules, items): (Vec<&GrowthItem>, Vec<&GrowthItem>) = growth.iter().partition(|g| g.kind == GrowthKind::Rule);
 
     let total: i64 = rules.iter().map(|g| g.delta).sum();
     println!("  all findings: {}", signed(total));
@@ -174,7 +174,14 @@ mod tests {
         assert_eq!(signed(1_500_000_000), "+1.5 GB");
         assert_eq!(signed(-2_000), "−2.0 KB");
         let home = Path::new("/Users/me");
-        let g = |key: &str| GrowthItem { key: key.into(), label: "lbl".into(), bytes_then: 0, bytes_now: 1, delta: 1 };
+        let g = |key: &str| GrowthItem {
+            kind: GrowthKind::Item,
+            key: key.into(),
+            label: "lbl".into(),
+            bytes_then: 0,
+            bytes_now: 1,
+            delta: 1,
+        };
         assert_eq!(item_name(&g("dev.nm:/Users/me/p/node_modules"), home), "~/p/node_modules  (dev.nm)");
         assert_eq!(item_name(&g("docker:reclaimable"), home), "lbl  (docker: reclaimable)");
     }

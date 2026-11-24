@@ -9,7 +9,15 @@ use std::process::Command as Proc;
 use chrono::Utc;
 
 use super::*;
-use crate::model::{Category, DetectorKind, Risk, VolumeInfo};
+use crate::model::{Category, CleanOutcome, DetectorKind, Risk, VolumeInfo};
+
+/// `assert_eq!` on a result item's outcome, with optional context arguments.
+macro_rules! assert_done {
+    ($item:expr $(, $($arg:tt)+)?) => { assert_eq!($item.outcome, CleanOutcome::Done $(, $($arg)+)?) };
+}
+macro_rules! assert_failed {
+    ($item:expr $(, $($arg:tt)+)?) => { assert_eq!($item.outcome, CleanOutcome::Failed $(, $($arg)+)?) };
+}
 
 struct Fx {
     tmp: tempfile::TempDir,
@@ -250,7 +258,7 @@ fn dry_run_has_no_side_effects() {
     for mode in [CleanMode::Delete, CleanMode::Trash] {
         let res = run(&fx.env, &rep, &req(&[&a, &c, &wt], mode, true), Some(&history));
         assert!(res.dry_run);
-        assert!(res.items.iter().all(|i| i.ok), "{:?}", res.items);
+        assert!(res.items.iter().all(|i| i.outcome == CleanOutcome::Done), "{:?}", res.items);
         assert!(msg(item(&res, &a)).starts_with("dry run"));
         match mode {
             CleanMode::Delete => assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (1010 + 100 + 50, 0)),
@@ -278,7 +286,7 @@ fn delete_removes_items_records_them_and_reports_covered_children() {
 
     let res = run(&fx.env, &rep, &req(&[&nested, &a, &c, &link], CleanMode::Delete, false), Some(&history));
     assert!(!res.dry_run);
-    assert!(res.items.iter().all(|i| i.ok), "{:?}", res.items);
+    assert!(res.items.iter().all(|i| i.outcome == CleanOutcome::Done), "{:?}", res.items);
     assert_eq!(res.freed_bytes, 1010 + 100 + 1);
     assert_eq!(res.moved_to_trash_bytes, 0);
     assert_eq!(res.items.last().unwrap().finding_id, nested.id, "covered child reported after its parent");
@@ -291,7 +299,7 @@ fn delete_removes_items_records_them_and_reports_covered_children() {
 
     let log = history.recent_actions(10).unwrap();
     assert_eq!(log.len(), 3, "acted-on items are audited, covered child is not");
-    assert!(log.iter().all(|r| r.ok && r.mode == "delete"));
+    assert!(log.iter().all(|r| r.outcome == CleanOutcome::Done && r.mode == "delete"));
 }
 
 #[test]
@@ -316,8 +324,8 @@ fn revalidation_failures_do_not_stop_the_rest() {
     assert!(msg(item(&res, &outside)).contains("outside the home directory"));
     assert!(msg(item(&res, &wrong_rule)).contains("outside its roots"));
     assert!(msg(item(&res, &no_rule)).contains("no longer in the catalog"));
-    assert!(item(&res, &good).ok, "{:?}", item(&res, &good));
-    assert_eq!(res.items.iter().filter(|i| !i.ok).count(), 5);
+    assert_done!(item(&res, &good), "{:?}", item(&res, &good));
+    assert_eq!(res.items.iter().filter(|i| i.outcome == CleanOutcome::Failed).count(), 5);
     assert_eq!(res.freed_bytes, 1);
     assert!(!h.join("Library/Caches/c.bin").exists());
     assert!(h.join("Library").exists() && fx.tmp.path().join("outside/precious").exists());
@@ -325,7 +333,7 @@ fn revalidation_failures_do_not_stop_the_rest() {
 
     let log = history.recent_actions(10).unwrap();
     assert_eq!(log.len(), 6, "refusals are audited too");
-    assert_eq!(log.iter().filter(|r| r.ok).count(), 1);
+    assert_eq!(log.iter().filter(|r| r.outcome == CleanOutcome::Done).count(), 1);
 }
 
 #[test]
@@ -337,7 +345,7 @@ fn history_data_dir_is_protected() {
     let f = finding("dot.local", Some(&h.join(".local/cmm")), 1, ActionKind::Trash);
     let rep = report(vec![f.clone()]);
     let res = run(&fx.env, &rep, &req(&[&f], CleanMode::Delete, false), Some(&history));
-    assert!(!item(&res, &f).ok);
+    assert_failed!(item(&res, &f));
     assert!(msg(item(&res, &f)).contains("protected"), "{}", msg(item(&res, &f)));
     assert!(h.join(".local/cmm/history.sqlite").exists());
 }
@@ -350,7 +358,7 @@ fn revalidation_catches_a_process_that_started_after_the_scan() {
     let rep = report(vec![vm.clone()]);
     fx.env.processes = Box::new(|| ProcessSnapshot::from_names(["FakeApp"]));
     let res = run(&fx.env, &rep, &req(&[&vm], CleanMode::Delete, false), None);
-    assert!(!item(&res, &vm).ok);
+    assert_failed!(item(&res, &vm));
     assert_eq!(msg(item(&res, &vm)), "FakeApp is running — quit it first");
     assert!(fx.home.join("vm/bundle/disk.img").exists());
     assert_eq!(res.freed_bytes, 0);
@@ -368,7 +376,7 @@ fn revalidation_uses_a_live_process_snapshot() {
     let res = run(&fx.env, &rep, &req(&[&vm], CleanMode::Delete, true), None);
     let _ = child.kill();
     let _ = child.wait();
-    assert!(!item(&res, &vm).ok, "{:?}", item(&res, &vm));
+    assert_failed!(item(&res, &vm), "{:?}", item(&res, &vm));
     assert!(msg(item(&res, &vm)).contains("sleep is running"));
 }
 
@@ -383,7 +391,11 @@ fn command_allowlist_is_enforced_at_execution() {
     );
     let rep = report(vec![rm.clone(), sh.clone()]);
     let res = run(&fx.env, &rep, &req(&[&rm, &sh], CleanMode::Delete, false), None);
-    assert!(res.items.iter().all(|i| !i.ok && msg(i).contains("is not an allowed program")), "{:?}", res.items);
+    assert!(
+        res.items.iter().all(|i| i.outcome == CleanOutcome::Skipped && msg(i).contains("is not an allowed program")),
+        "{:?}",
+        res.items
+    );
     assert!(victim.join("blob").exists());
 }
 
@@ -395,9 +407,9 @@ fn allowlisted_command_runs_and_failures_capture_stderr() {
     bad.id = "tool.cmd:bad".into();
     let rep = report(vec![ok.clone(), bad.clone()]);
     let res = run(&fx.env, &rep, &req(&[&ok, &bad], CleanMode::Trash, false), None);
-    assert!(item(&res, &ok).ok, "{:?}", item(&res, &ok));
+    assert_done!(item(&res, &ok), "{:?}", item(&res, &ok));
     assert_eq!(msg(item(&res, &ok)), "ran `git --version`");
-    assert!(!item(&res, &bad).ok);
+    assert_failed!(item(&res, &bad));
     assert!(msg(item(&res, &bad)).contains("not a git command"), "{}", msg(item(&res, &bad)));
     assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (300, 0), "commands free space directly");
 }
@@ -460,7 +472,7 @@ fn worktree_that_became_dirty_is_refused_clean_one_is_removed() {
     fs::write(wt_path.join("new.txt"), "work in progress").unwrap();
     fs::write(wt_path.join("README"), "changed").unwrap();
     let res = run(&fx.env, &rep, &req(&[&wt], CleanMode::Trash, false), Some(&history));
-    assert!(!item(&res, &wt).ok);
+    assert_failed!(item(&res, &wt));
     assert!(msg(item(&res, &wt)).contains("uncommitted changes (2 path(s))"), "{}", msg(item(&res, &wt)));
     assert!(wt_path.join("new.txt").exists());
 
@@ -468,7 +480,7 @@ fn worktree_that_became_dirty_is_refused_clean_one_is_removed() {
     fs::remove_file(wt_path.join("new.txt")).unwrap();
     git(&wt_path, &["checkout", "-q", "--", "README"]);
     let res = run(&fx.env, &rep, &req(&[&wt], CleanMode::Trash, false), Some(&history));
-    assert!(item(&res, &wt).ok, "{:?}", item(&res, &wt));
+    assert_done!(item(&res, &wt), "{:?}", item(&res, &wt));
     assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (50, 0));
     assert!(!wt_path.exists());
     assert!(!git(&repo, &["worktree", "list"]).contains("worktrees/wt"));
@@ -476,8 +488,8 @@ fn worktree_that_became_dirty_is_refused_clean_one_is_removed() {
 
     let log = history.recent_actions(10).unwrap();
     assert_eq!(
-        log.iter().map(|r| (r.mode.as_str(), r.ok)).collect::<Vec<_>>(),
-        [("git-worktree-remove", true), ("git-worktree-remove", false)]
+        log.iter().map(|r| (r.mode.as_str(), r.outcome)).collect::<Vec<_>>(),
+        [("git-worktree-remove", CleanOutcome::Done), ("git-worktree-remove", CleanOutcome::Failed)]
     );
 }
 
@@ -528,7 +540,7 @@ fn worktree_command_must_match_the_finding() {
         wt.command = Some(argv);
         let rep = report(vec![wt.clone()]);
         let res = run(&fx.env, &rep, &req(&[&wt], CleanMode::Trash, false), None);
-        assert!(!item(&res, &wt).ok, "{name}: {:?}", item(&res, &wt));
+        assert_failed!(item(&res, &wt), "{name}: {:?}", item(&res, &wt));
         assert!(msg(item(&res, &wt)).contains("worktree command"), "{name}: {}", msg(item(&res, &wt)));
     }
     assert!(wt_path.join("README").exists());
@@ -543,7 +555,7 @@ fn trash_moves_item() {
     let c = finding("cache.test", Some(&fx.home.join("Library/Caches/c.bin")), 100, ActionKind::Delete);
     let rep = report(vec![c.clone()]);
     let res = run(&fx.env, &rep, &req(&[&c], CleanMode::Trash, false), None);
-    assert!(item(&res, &c).ok, "{:?}", item(&res, &c));
+    assert_done!(item(&res, &c), "{:?}", item(&res, &c));
     assert_eq!(msg(item(&res, &c)), "moved to Trash", "Delete-action finding still goes to Trash in Trash mode");
     assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (0, 100));
     assert!(!fx.home.join("Library/Caches/c.bin").exists());

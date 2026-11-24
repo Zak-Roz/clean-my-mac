@@ -180,9 +180,9 @@ function PlanItem({
         <span className="mt-px shrink-0">
           {!result ? (
             <Spinner size={15} />
-          ) : result.ok && result.bytes === 0 && result.message ? (
+          ) : result.outcome === "skipped" ? (
             <MinusCircleIcon className="text-fg-3" aria-label="Skipped" />
-          ) : result.ok ? (
+          ) : result.outcome === "done" ? (
             <CheckCircleIcon className="text-good" aria-label="Done" />
           ) : (
             <XCircleIcon className="text-critical" aria-label="Failed" />
@@ -197,10 +197,15 @@ function PlanItem({
         <div className="selectable truncate font-mono text-[10.5px] text-fg-3" title={f.path ?? undefined}>
           {f.path ? tildify(f.path) : (f.command ?? []).join(" ")}
         </div>
-        {result?.ok && !result.message ? (
+        {result?.outcome === "done" && !result.message ? (
           <div className="mt-0.5 text-[11.5px] text-good-text">{doneDescription(f, mode)}</div>
         ) : result?.message ? (
-          <div className={cx("selectable mt-0.5 text-[11.5px]", result.ok ? "text-fg-2" : "text-critical-text")}>
+          <div
+            className={cx(
+              "selectable mt-0.5 text-[11.5px]",
+              result.outcome === "failed" ? "text-critical-text" : "text-fg-2",
+            )}
+          >
             {result.message}
           </div>
         ) : (
@@ -288,7 +293,7 @@ function ModeChoice({ mode, setMode }: { mode: CleanMode; setMode: (m: CleanMode
 }
 
 function ResultSummary({ result }: { result: CleanResult }) {
-  const failed = result.items.filter((i) => !i.ok);
+  const failed = result.items.filter((i) => i.outcome !== "done");
   if (result.items.length === 0) {
     return (
       <Callout tone="warn" title="Nothing was cleaned">

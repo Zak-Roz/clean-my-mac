@@ -12,12 +12,14 @@ use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::error::CoreError;
-use crate::model::{ActionKind, CleanItemResult, CleanMode, Finding, FreeSpacePoint, GrowthItem, ScanReport};
+use crate::model::{
+    ActionKind, CleanItemResult, CleanMode, CleanOutcome, Finding, FreeSpacePoint, GrowthItem, GrowthKind, ScanReport,
+};
 
 /// Current schema version (`PRAGMA user_version`).
 pub const SCHEMA_VERSION: i32 = 1;
 
-/// Version 1: the §8 schema plus lookup indexes.
+/// Version 1: the §8 schema (contract v2: `actions.outcome` instead of `ok`) plus lookup indexes.
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS scans (
     id TEXT PRIMARY KEY,
@@ -43,7 +45,7 @@ CREATE TABLE IF NOT EXISTS actions (
     path TEXT,
     mode TEXT NOT NULL,
     bytes INTEGER NOT NULL,
-    ok INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
     message TEXT
 );
 CREATE INDEX IF NOT EXISTS actions_at ON actions(at);
@@ -71,7 +73,7 @@ pub struct ActionRecord {
     /// `trash`, `delete`, `git-worktree-remove` or `command` — what was actually done.
     pub mode: String,
     pub bytes: u64,
-    pub ok: bool,
+    pub outcome: CleanOutcome,
     pub message: Option<String>,
 }
 
@@ -95,6 +97,24 @@ fn to_i64(v: u64) -> i64 {
 
 fn to_u64(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
+}
+
+/// `done` / `skipped` / `failed`, as stored in `actions.outcome`.
+fn outcome_text(outcome: CleanOutcome) -> &'static str {
+    match outcome {
+        CleanOutcome::Done => "done",
+        CleanOutcome::Skipped => "skipped",
+        CleanOutcome::Failed => "failed",
+    }
+}
+
+fn parse_outcome(text: &str) -> Result<CleanOutcome, CoreError> {
+    match text {
+        "done" => Ok(CleanOutcome::Done),
+        "skipped" => Ok(CleanOutcome::Skipped),
+        "failed" => Ok(CleanOutcome::Failed),
+        other => Err(CoreError::History(format!("bad action outcome {other:?}"))),
+    }
 }
 
 /// What an executed item actually did: the finding's action combined with the clean mode
@@ -172,7 +192,7 @@ impl History {
     pub fn record_action(&self, finding: &Finding, mode: CleanMode, result: &CleanItemResult) -> Result<(), CoreError> {
         self.conn
             .execute(
-                "INSERT INTO actions (at, finding_id, path, mode, bytes, ok, message)
+                "INSERT INTO actions (at, finding_id, path, mode, bytes, outcome, message)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     ts(Utc::now()),
@@ -180,7 +200,7 @@ impl History {
                     finding.path,
                     action_label(finding.action, mode),
                     to_i64(result.bytes),
-                    result.ok,
+                    outcome_text(result.outcome),
                     result.message,
                 ],
             )
@@ -193,25 +213,41 @@ impl History {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT at, finding_id, path, mode, bytes, ok, message FROM actions ORDER BY at DESC, id DESC LIMIT ?1",
+                "SELECT at, finding_id, path, mode, bytes, outcome, message FROM actions ORDER BY at DESC, id DESC LIMIT ?1",
             )
             .map_err(db_err)?;
         let rows = stmt
             .query_map(params![limit], |r| {
-                Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)?, r.get(5)?, r.get(6)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get(6)?,
+                ))
             })
             .map_err(db_err)?;
         let mut out = Vec::new();
         for row in rows {
-            let (at, finding_id, path, mode, bytes, ok, message) = row.map_err(db_err)?;
-            out.push(ActionRecord { at: parse_ts(&at)?, finding_id, path, mode, bytes: to_u64(bytes), ok, message });
+            let (at, finding_id, path, mode, bytes, outcome, message) = row.map_err(db_err)?;
+            out.push(ActionRecord {
+                at: parse_ts(&at)?,
+                finding_id,
+                path,
+                mode,
+                bytes: to_u64(bytes),
+                outcome: parse_outcome(&outcome)?,
+                message,
+            });
         }
         Ok(out)
     }
 
-    /// Growth between the latest scan and a baseline `days` back: one item per finding id
-    /// (`key` = finding id) and one per rule (`key = "rule:<rule_id>"`, `label` = rule id),
-    /// sorted by delta descending. Findings missing from one side count as 0 bytes there.
+    /// Growth between the latest scan and a baseline `days` back: one [`GrowthKind::Item`] per
+    /// finding id (`key` = finding id) and one [`GrowthKind::Rule`] per rule (`key` = `label` =
+    /// rule id), sorted by delta descending (ties: rules first, then by key). Findings missing from one side count as 0 bytes there.
     ///
     /// Baseline: the latest scan at or before `now - days`; if there is none, the oldest scan.
     /// The latest scan is never its own baseline. Fewer than two scans → empty.
@@ -273,14 +309,15 @@ impl History {
             e.0 = &s.label; // prefer the newest label
             e.3 = s.bytes;
         }
-        let mut by_rule: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        let mut by_rule: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
         for (_, rule_id, then_b, now_b) in by_finding.values() {
-            let e = by_rule.entry(format!("rule:{rule_id}")).or_default();
+            let e = by_rule.entry(rule_id).or_default();
             e.0 += then_b;
             e.1 += now_b;
         }
 
-        let item = |key: String, label: String, bytes_then: u64, bytes_now: u64| GrowthItem {
+        let item = |kind: GrowthKind, key: String, label: String, bytes_then: u64, bytes_now: u64| GrowthItem {
+            kind,
             key,
             label,
             bytes_then,
@@ -289,13 +326,20 @@ impl History {
         };
         let mut out: Vec<GrowthItem> = by_rule
             .into_iter()
-            .map(|(key, (t, n))| {
-                let label = key.trim_start_matches("rule:").to_string();
-                item(key, label, t, n)
-            })
+            .map(|(rule_id, (t, n))| item(GrowthKind::Rule, rule_id.to_string(), rule_id.to_string(), t, n))
             .collect();
-        out.extend(by_finding.into_iter().map(|(id, (label, _, t, n))| item(id.to_string(), label.to_string(), t, n)));
-        out.sort_by(|a, b| b.delta.cmp(&a.delta).then_with(|| a.key.cmp(&b.key)));
+        out.extend(
+            by_finding
+                .into_iter()
+                .map(|(id, (label, _, t, n))| item(GrowthKind::Item, id.to_string(), label.to_string(), t, n)),
+        );
+        let rank = |k: GrowthKind| match k {
+            GrowthKind::Rule => 0,
+            GrowthKind::Item => 1,
+        };
+        out.sort_by(|a, b| {
+            b.delta.cmp(&a.delta).then_with(|| rank(a.kind).cmp(&rank(b.kind))).then_with(|| a.key.cmp(&b.key))
+        });
         Ok(out)
     }
 
@@ -514,12 +558,15 @@ mod tests {
         assert_eq!(m["cache.npm:/n"], (400, 450, 50));
         assert_eq!(m["dev.nm:/p2/node_modules"], (200, 260, 60));
         assert_eq!(m["dev.nm:/p1/node_modules"], (300, 0, -300), "gone since baseline");
-        assert_eq!(m["rule:vm"], (1_000, 2_000, 1_000));
-        assert_eq!(m["rule:dev.nm"], (500, 260, -240));
-        assert_eq!(m["rule:cache.npm"], (400, 450, 50));
+        assert_eq!(m["vm"], (1_000, 2_000, 1_000));
+        assert_eq!(m["dev.nm"], (500, 260, -240));
+        assert_eq!(m["cache.npm"], (400, 450, 50));
         assert!(g.windows(2).all(|w| w[0].delta >= w[1].delta), "sorted by delta desc");
-        assert_eq!(g[0].key, "rule:vm", "ties broken by key");
-        assert_eq!(g.iter().find(|i| i.key == "rule:vm").unwrap().label, "vm");
+        assert_eq!((g[0].kind, g[0].key.as_str()), (GrowthKind::Rule, "vm"), "ties: rules first");
+        assert_eq!((g[1].kind, g[1].key.as_str()), (GrowthKind::Item, "vm:/vm"));
+        assert_eq!(g.iter().find(|i| i.key == "vm").unwrap().label, "vm");
+        let kinds = |kind| g.iter().filter(|i| i.kind == kind).count();
+        assert_eq!((kinds(GrowthKind::Rule), kinds(GrowthKind::Item)), (3, 4));
         assert_eq!(h.growth_window_at(7, now).unwrap(), Some((at("2026-11-14T12:00:00Z"), at("2026-11-24T12:00:00Z"))));
 
         // 30 days: baseline = Oct 15 (the only scan before Oct 25).
@@ -527,7 +574,7 @@ mod tests {
         let m30 = by_key(&g30);
         assert_eq!(m30["vm:/vm"], (50, 2_000, 1_950));
         assert_eq!(m30["dev.nm:/p2/node_modules"], (0, 260, 260), "new since baseline");
-        assert_eq!(m30["rule:dev.nm"], (300, 260, -40));
+        assert_eq!(m30["dev.nm"], (300, 260, -40));
 
         // 365 days: nothing that old → fall back to the oldest scan.
         assert_eq!(by_key(&h.growth_at(365, now).unwrap())["vm:/vm"], (50, 2_000, 1_950));
@@ -562,20 +609,38 @@ mod tests {
     fn record_action_writes_audit_log() {
         let (_d, h) = open_tmp();
         let mut f = finding("dev.wt", "/repo/.claude/worktrees/x", 42);
-        let ok =
-            CleanItemResult { finding_id: f.id.clone(), ok: true, bytes: 42, message: Some("moved to Trash".into()) };
-        h.record_action(&f, CleanMode::Trash, &ok).unwrap();
+        let done = CleanItemResult {
+            finding_id: f.id.clone(),
+            outcome: CleanOutcome::Done,
+            bytes: 42,
+            message: Some("moved to Trash".into()),
+        };
+        h.record_action(&f, CleanMode::Trash, &done).unwrap();
         f.action = ActionKind::GitWorktreeRemove;
-        let failed = CleanItemResult { finding_id: f.id.clone(), ok: false, bytes: 0, message: Some("dirty".into()) };
-        h.record_action(&f, CleanMode::Trash, &failed).unwrap();
+        let failed = CleanItemResult {
+            finding_id: f.id.clone(),
+            outcome: CleanOutcome::Failed,
+            bytes: 0,
+            message: Some("dirty".into()),
+        };
+        h.record_action(&f, CleanMode::Delete, &failed).unwrap();
 
         let rows = h.recent_actions(10).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].mode, "git-worktree-remove");
-        assert!(!rows[0].ok);
+        assert_eq!(rows[0].outcome, CleanOutcome::Failed);
         assert_eq!(rows[0].message.as_deref(), Some("dirty"));
         assert_eq!(rows[1].mode, "trash");
-        assert_eq!((rows[1].bytes, rows[1].ok), (42, true));
+        assert_eq!((rows[1].bytes, rows[1].outcome), (42, CleanOutcome::Done));
+        let stored: Vec<String> = h
+            .conn
+            .prepare("SELECT outcome FROM actions ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(stored, ["done", "failed"]);
         assert_eq!(rows[1].path.as_deref(), Some("/repo/.claude/worktrees/x"));
     }
 
@@ -599,7 +664,12 @@ mod tests {
                     let h = History::open(&path).unwrap();
                     for j in 0..10 {
                         let f = finding("t", &format!("/{i}/{j}"), 1);
-                        let r = CleanItemResult { finding_id: f.id.clone(), ok: true, bytes: 1, message: None };
+                        let r = CleanItemResult {
+                            finding_id: f.id.clone(),
+                            outcome: CleanOutcome::Done,
+                            bytes: 1,
+                            message: None,
+                        };
                         h.record_action(&f, CleanMode::Delete, &r).unwrap();
                     }
                 })
