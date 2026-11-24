@@ -1,8 +1,10 @@
 // Mock backend for `VITE_MOCK=1` (ARCHITECTURE.md §7): serves fixtures/sample-report.json and
 // simulates everything else so every screen can be exercised in a plain browser:
 // - scans emit `scan://progress` over ~2.5 s;
-// - plan/execute re-validate like the core will: one item turns out blocked ("Claude is running"),
-//   the Docker prune fails, the rest succeed; cleaned findings disappear from later scans;
+// - plan/execute re-scan like the core does (safety fix 1): at plan time one item turns out blocked
+//   ("Claude is running") and is left out with a "no longer matches the scan" warning; at execute
+//   time the leftover worktree folder has become a real worktree and is skipped, the Docker prune
+//   fails, the rest succeed; cleaned findings disappear from later scans;
 // - history returns ~90 days of synthetic free-space points and growth rows;
 // - "Open Settings" for Full Disk Access grants it, so the Trash size appears on the next check.
 
@@ -47,9 +49,13 @@ const EXTRA_RULES = [
   "app-caches.slack",
 ];
 
-/** Mock re-validation at plan/execute time. */
-function revalidate(f: Finding): { blocked?: string; fails?: string } {
+/** Mock fresh scan at plan/execute time: what changed since the stored report. */
+function revalidate(f: Finding): { blocked?: string; changed?: string; fails?: string } {
   if (f.ruleId === "ai.claude-desktop.vm-bundles") return { blocked: "Claude is running" };
+  // The leftover worktree folder became a real worktree between the plan and the clean.
+  if (f.ruleId === "dev.git-worktrees" && f.action === "trash") {
+    return { changed: "its action changed from trash to git-worktree-remove" };
+  }
   if (f.command?.[0] === "docker") {
     return {
       fails: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
@@ -74,11 +80,13 @@ export function createMockApi(): Api {
 
   async function plan(req: CleanRequest): Promise<CleanPlan> {
     const report = lastReport ?? (await loadFixture());
-    const items = report.findings.filter((f) => req.findingIds.includes(f.id));
+    const selected = report.findings.filter((f) => req.findingIds.includes(f.id));
     const warnings: string[] = [];
-    for (const f of items) {
+    const items: Finding[] = [];
+    for (const f of selected) {
       const { blocked } = revalidate(f);
-      if (blocked) warnings.push(`${f.label}: ${blocked} — it will be skipped. Quit it and clean again.`);
+      if (blocked) warnings.push(`Skipped ${f.label}: no longer matches the scan (now blocked: ${blocked})`);
+      else items.push(f);
     }
     const { bytes, covered } = dedupedTotal(items);
     for (const f of covered) warnings.push(`${f.label} is inside another selected item and is covered by it.`);
@@ -140,12 +148,17 @@ export function createMockApi(): Api {
       const covered = new Set(dedupedTotal(items).covered.map((f) => f.id));
       for (const f of items) {
         if (!req.dryRun) await sleep(380);
-        const { blocked, fails } = revalidate(f);
+        const { changed, fails } = revalidate(f);
         let result: CleanItemResult;
         if (covered.has(f.id)) {
           result = { findingId: f.id, outcome: "done", bytes: 0, message: "Covered by parent" };
-        } else if (blocked) {
-          result = { findingId: f.id, outcome: "skipped", bytes: 0, message: `Skipped: ${blocked}` };
+        } else if (changed) {
+          result = {
+            findingId: f.id,
+            outcome: "skipped",
+            bytes: 0,
+            message: `skipped: no longer matches the scan (${changed})`,
+          };
         } else if (fails && !req.dryRun) {
           result = { findingId: f.id, outcome: "failed", bytes: 0, message: `docker system prune failed: ${fails}` };
         } else {

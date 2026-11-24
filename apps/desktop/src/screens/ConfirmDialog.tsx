@@ -1,5 +1,7 @@
 // Confirm sheet: dry-run plan → Trash (default) or Delete (second confirmation) → live per-item
-// progress from `clean://item` → result (freed now / moved to Trash / failed).
+// progress from `clean://item` → result (freed now / moved to Trash / skipped / failed).
+// The backend re-scans the selected items for the plan and again right before cleaning; whatever
+// changed since the scan is left alone and shown as Skipped with the reason.
 
 import * as Dialog from "@radix-ui/react-dialog";
 import { type ReactNode, useEffect, useState } from "react";
@@ -12,6 +14,7 @@ import type { Finding } from "../bindings/Finding";
 import { CheckCircleIcon, InfoIcon, MinusCircleIcon, TrashIcon, WarningIcon, XCircleIcon } from "../components/icons";
 import { ShowTrashButton } from "../components/trash";
 import { Button, Callout, cx, RiskBadge, Spinner } from "../components/ui";
+import { isStale, isUnaudited, itemMessage, outcomeCounts, staleWarnings } from "../lib/clean";
 import { actionDescription, doneDescription, isPermanentAction, isSelectable } from "../lib/findings";
 import { errorMessage, formatBytes, formatCount, isNotImplemented, stubDetail, tildify } from "../lib/format";
 import { useApp } from "../state";
@@ -98,15 +101,15 @@ function ConfirmContent({ onClose }: { onClose: () => void }) {
           {phase.kind === "done"
             ? "Here is what happened to each item."
             : phase.kind === "executing"
-              ? "Each item is checked again right before it is removed."
-              : "Nothing is removed until you confirm. Each item is checked again right before it is removed."}
+              ? "Each item is scanned again right before it is removed; anything that changed is left alone."
+              : "Nothing is removed until you confirm. Each item is scanned again right before it is removed."}
         </Dialog.Description>
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 pb-4">
         {phase.kind === "planning" && (
           <div className="flex items-center gap-2 py-8 text-[12.5px] text-fg-2">
-            <Spinner /> Checking the selected items…
+            <Spinner /> Scanning the selected items again…
           </div>
         )}
         {phase.kind === "plan-error" && (
@@ -116,7 +119,7 @@ function ConfirmContent({ onClose }: { onClose: () => void }) {
               : phase.message}
           </Callout>
         )}
-        {phase.kind === "done" && <ResultSummary result={phase.result} />}
+        {phase.kind === "done" && <ResultSummary result={phase.result} plan={phase.plan} />}
         {phase.kind === "exec-error" && (
           <Callout tone="critical" title="The clean stopped">
             {phase.message}. Items not listed as done were left in place.
@@ -204,10 +207,15 @@ function PlanItem({
           <div
             className={cx(
               "selectable mt-0.5 text-[11.5px]",
-              result.outcome === "failed" ? "text-critical-text" : "text-fg-2",
+              result.outcome === "failed"
+                ? "text-critical-text"
+                : isStale(result) || isUnaudited(result)
+                  ? "text-warn-text"
+                  : "text-fg-2",
             )}
           >
-            {result.message}
+            {result.outcome === "skipped" && <span className="font-medium">Skipped: </span>}
+            {itemMessage(result)}
           </div>
         ) : (
           <div className={cx("mt-0.5 text-[11.5px]", isPermanentAction(f) ? "text-warn-text" : "text-fg-2")}>
@@ -293,9 +301,12 @@ function ModeChoice({ mode, setMode }: { mode: CleanMode; setMode: (m: CleanMode
   );
 }
 
-function ResultSummary({ result }: { result: CleanResult }) {
-  const failed = result.items.filter((i) => i.outcome !== "done");
-  if (result.items.length === 0) {
+function ResultSummary({ result, plan }: { result: CleanResult; plan: CleanPlan }) {
+  const counts = outcomeCounts(result);
+  // Items the plan already left out because they changed since the scan (not in the list below).
+  const leftOut = staleWarnings(plan.warnings);
+  const changed = counts.stale + leftOut.length;
+  if (result.items.length === 0 && leftOut.length === 0) {
     return (
       <Callout tone="warn" title="Nothing was cleaned">
         The clean engine returned no results — cleaning isn't available in this build yet. Nothing was changed.
@@ -304,15 +315,38 @@ function ResultSummary({ result }: { result: CleanResult }) {
   }
   return (
     <div className="space-y-3">
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-4 gap-2">
         <Stat label="Freed now" value={formatBytes(result.freedBytes)} />
         <Stat label="Moved to Trash" value={formatBytes(result.movedToTrashBytes)} />
         <Stat
-          label="Failed or skipped"
-          value={String(failed.length)}
-          icon={failed.length > 0 ? <WarningIcon size={14} className="text-warn" /> : undefined}
+          label="Skipped"
+          value={String(counts.skipped + leftOut.length)}
+          icon={counts.skipped + leftOut.length > 0 ? <MinusCircleIcon size={14} className="text-fg-3" /> : undefined}
+        />
+        <Stat
+          label="Failed"
+          value={String(counts.failed)}
+          icon={counts.failed > 0 ? <WarningIcon size={14} className="text-warn" /> : undefined}
         />
       </div>
+      {changed > 0 && (
+        <Callout tone="warn" title={`${formatCount(changed, "item")} changed since the last scan`}>
+          {changed === 1 ? "It was" : "They were"} left alone. Scan again to see what is there now.
+          {leftOut.length > 0 && (
+            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+              {leftOut.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
+          )}
+        </Callout>
+      )}
+      {counts.unaudited > 0 && (
+        <Callout tone="critical" title="The audit log could not be written">
+          {formatCount(counts.unaudited, "item")} {counts.unaudited === 1 ? "was" : "were"} removed but not recorded in
+          the history database. See the item messages below.
+        </Callout>
+      )}
       {result.movedToTrashBytes > 0 && (
         <Callout
           tone="info"
