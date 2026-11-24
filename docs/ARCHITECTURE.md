@@ -168,8 +168,12 @@ pub fn check_target(path: &Path, home: &Path) -> Result<PathBuf, CoreError>; // 
 
 // actions/mod.rs
 pub struct CleanPlan { pub items: Vec<Finding>, pub total_bytes: u64, pub warnings: Vec<String> }
-pub fn plan(report: &ScanReport, req: &CleanRequest) -> Result<CleanPlan, CoreError>;
-pub fn execute(report: &ScanReport, req: &CleanRequest, history: Option<&History>, on_item: &dyn Fn(&CleanItemResult)) -> CleanResult;
+// The stored report (`selected_from`) is only used to know what the user selected; both functions re-scan the
+// requested rules and act/plan on the fresh findings (see "Safety fixes" in §10). There is no public execute on a
+// stored report. `_with` variants take an `ExecuteEnv` (temp home, fake trash hook) for tests.
+pub fn plan_fresh(rules: &[RuleDef], selected_from: &ScanReport, req: &CleanRequest, config: &Config, home: &Path) -> Result<CleanPlan, CoreError>;
+pub fn execute_fresh(rules: &[RuleDef], selected_from: &ScanReport, req: &CleanRequest, config: &Config, home: &Path,
+                     history: Option<&History>, on_item: &dyn Fn(&CleanItemResult)) -> CleanResult;
 
 // history/mod.rs
 pub struct History { /* rusqlite connection */ }
@@ -235,8 +239,12 @@ The CLI re-runs a scan (scoped to the requested rules) before `clean`, so it nev
 2. `guard::check_target` — the canonical path (`symlink_metadata`, never follow links) must be inside `$HOME`
    and must **not** be or contain any of: `$HOME`, `~/Documents`, `~/Desktop`, `~/Downloads`, `~/Developer`,
    `~/Library`, `~/Library/Application Support`, `~/Library/Keychains`, `~/Library/Mobile Documents`, `~/.ssh`,
-   `~/.gnupg`, any `.git` directory, the app's own `data_dir`. (Deleting *inside* those is fine.)
-3. Re-validate at execution: path exists, rule still matches, `requires_quit` processes not running, git worktree still clean.
+   `~/.gnupg`, the app's own `data_dir`. (Deleting *inside* those is fine.) A target that is or contains any `.git`
+   entry (file, directory or link) is refused; only a worktree finding's own top-level `.git` file is allowed
+   (`guard::check_worktree_target_with`).
+3. Re-validate at execution via a fresh scan of the requested rules: act only on findings with identical id, action,
+   path and argv and no blockers; worktrees additionally re-check lock, submodules, untracked/dirty state and commits
+   unreachable from remotes right before acting.
 4. `Command` actions only for allowlisted programs: `xcrun`, `docker`, `git`, `tmutil`, `brew`, `npm`, `pnpm`, `yarn`.
 5. Dry-run everywhere; the CLI is dry-run unless `--yes`.
 6. Every executed action is written to the history `actions` table (audit log).
@@ -318,10 +326,8 @@ conflict waiting to happen — report the need instead.
 - `GrowthItem.kind: GrowthKind { Rule, Item }`; the UI no longer parses `:` in keys.
 - `lib.rs` re-exports `scan_at`.
 - `min_finding_bytes` does not apply to `Command` and `InfoOnly` findings (zero-byte `git worktree prune`, blocked runtimes).
-- **Worktree removal follows the clean mode.** `Trash`: guard-check the worktree folder, move it to the Trash, then run
-  `git -C <repo> worktree prune` (ignored files like `.env` stay recoverable). `Delete`: run the finding's
-  `git … worktree remove <path>` argv (never `--force`). The branch and its commits stay in git either way.
-  A worktree's `.git` **file** (gitdir pointer) does not trip the guard's `.git` rule; only `.git` directories do.
+- **Worktree removal follows the clean mode** — superseded in detail by "Safety fixes" item 3 below (no prune in
+  Trash mode; folder + its admin dir go to the Trash).
 - `Command` findings free space immediately whatever the mode. `Trash` frees nothing until the Trash is emptied.
 - One timed process runner: `process::run_with_timeout` (S1). S2's `detectors::external::run` becomes a thin wrapper or goes away.
 - Allowlisted programs are resolved to absolute paths (`/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`,
@@ -365,3 +371,14 @@ conflict waiting to happen — report the need instead.
 Quality bar for every stream: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace`; desktop also `pnpm -w lint` and `pnpm -w typecheck`. Filesystem tests use
 `tempfile` fixtures — **never** touch the real home directory in tests.
+
+### As shipped (a28953e) — accepted deviations
+
+- `plan_fresh` / `execute_fresh` take `selected_from: &ScanReport` (needed to compare id/action/argv); `plan_clean`
+  re-scans too, so the Confirm dialog shows the real state and lists items that changed since the scan.
+- The unpushed-commits blocker is the strict `rev-list HEAD --not --remotes` in both the detector and the executor:
+  worktrees of repos with **no remote** are always blocked (safe default).
+- Orphan worktree folders that still contain a `.git` file are blocked (the guard would refuse them anyway).
+- Known residual risks (documented, not fixed): files hidden via `assume-unchanged`/`skip-worktree` are invisible to
+  `git status`; running the standalone `git worktree prune` finding drops admin data of a worktree whose disk is only
+  unmounted (its reason text says so); `cmm clean` scans twice.
