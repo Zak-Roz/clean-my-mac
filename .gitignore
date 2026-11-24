@@ -1,0 +1,17 @@
+# Rust
+/target
+
+# Node / Vite / Turbo
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+
+# Tauri generated
+apps/desktop/src-tauri/gen/schemas
+
+# macOS
+.DS_Store
+
+# Local env
+.env*.local

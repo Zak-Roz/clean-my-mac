@@ -1,0 +1,25 @@
+[package]
+name = "cmm-core"
+description = "clean-my-mac core: rule model, scan engine, detectors, actions, history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono.workspace = true
+glob.workspace = true
+libc.workspace = true
+rayon.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+trash.workspace = true
+ts-rs.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

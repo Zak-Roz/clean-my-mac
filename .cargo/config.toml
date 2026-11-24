@@ -1,0 +1,6 @@
+# ts-rs configuration: `cargo test -p cmm-core export_bindings` regenerates the TypeScript
+# bindings consumed by the desktop app. u64/i64 are emitted as `number` (serde_json writes
+# plain JSON numbers, and byte counts stay far below 2^53).
+[env]
+TS_RS_EXPORT_DIR = { value = "apps/desktop/src/bindings", relative = true }
+TS_RS_LARGE_INT = "number"

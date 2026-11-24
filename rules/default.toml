@@ -1,0 +1,38 @@
+# Built-in rule catalog, embedded into cmm-core with include_str!.
+# Format: docs/ARCHITECTURE.md §4. The full catalog is filled in by work stream S2.
+
+[[rule]]
+id = "ai.claude-desktop.vm-bundles"
+title = "Claude Desktop VM bundle"
+description = "Linux VM used by Claude Desktop for code execution. Recreated on demand (~10 GB download)."
+category = "ai-tools"
+risk = "review"
+detector = "paths"
+roots = [
+  "~/Library/Application Support/Claude/vm_bundles",
+  "~/Library/Application Support/ai-profiles/profiles/*/gui-data/vm_bundles",
+]
+action = "trash"
+requires_quit = ["Claude"]
+regenerates = true
+
+[[rule]]
+id = "cache.npm"
+title = "npm cache"
+description = "npm's content-addressable package cache. npm re-downloads packages on demand."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/.npm/_cacache"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "downloads.old-files"
+title = "Old downloads"
+description = "Items in Downloads not opened or modified for a while. Review before removing."
+category = "downloads"
+risk = "manual"
+detector = "older-than"
+roots = ["~/Downloads"]
+action = "trash"
