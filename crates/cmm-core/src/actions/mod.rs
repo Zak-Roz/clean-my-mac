@@ -4,8 +4,11 @@
 //! **Never act on a stored report.** [`execute_fresh`] re-runs the scan for the rules of the
 //! requested findings and acts only on findings that are still there with the same id, action,
 //! path and command argv, and without blockers; everything else is `Skipped` ("no longer matches
-//! the scan"). [`plan_fresh`] does the same for the confirmation step. The stored report (the
-//! app's `last-report.json`, the CLI's first scan) only says which findings the user picked.
+//! the scan"). Findings other than `Command` must also still be what the user saw: the same
+//! file-vs-folder kind and a size within `max(10 %, 10 MiB)` of the stored one, otherwise they are
+//! skipped as "changed since the scan: X → Y, rescan" (`Command` findings are sized from tool
+//! output and exempt). [`plan_fresh`] does the same for the confirmation step. The stored report
+//! (the app's `last-report.json`, the CLI's first scan) only says which findings the user picked.
 //!
 //! The executor then re-validates every item right before acting on it: the path still exists and
 //! passes the guard (no `.git` entry inside, except a worktree's own pointer file), the rule still
@@ -49,6 +52,13 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Prefix of the reason for findings that a fresh scan no longer confirms.
 pub const NO_LONGER_MATCHES: &str = "no longer matches the scan";
+/// Why a finding whose size or file-vs-folder kind drifted is not acted on (inside the
+/// [`NO_LONGER_MATCHES`] reason).
+pub const CHANGED_SINCE_THE_SCAN: &str = "changed since the scan";
+/// A non-`Command` finding may differ in size from what the user saw by this percentage of the
+/// stored size, but by at least [`SIZE_DRIFT_MIN_BYTES`] (caches keep growing a little).
+const SIZE_DRIFT_PERCENT: u64 = 10;
+const SIZE_DRIFT_MIN_BYTES: u64 = 10 * 1024 * 1024;
 /// Item message when a real clean is refused because there is no audit log.
 pub const NO_AUDIT_LOG: &str = "refusing to clean without the audit log: the history database is not open";
 
@@ -139,9 +149,10 @@ pub fn plan_fresh_with(
 }
 
 /// Re-scans, re-validates and executes `req` against the real system (safety fix 1): only findings
-/// that a fresh scan still reports with the same id, action, path and argv, and without blockers,
-/// are acted on; the rest are `Skipped` ("no longer matches the scan (…)"). `selected_from` is the
-/// report the user picked the ids from (for display and selection only).
+/// that a fresh scan still reports with the same id, action, path and argv, without blockers and
+/// (except `Command` findings) with the same file-vs-folder kind and a size within
+/// `max(10 %, 10 MiB)`, are acted on; the rest are `Skipped` ("no longer matches the scan (…)").
+/// `selected_from` is the report the user picked the ids from (for display and selection only).
 ///
 /// A real clean (`dry_run == false`) without `history` is refused: every item is `Skipped` with
 /// [`NO_AUDIT_LOG`] and nothing is scanned or changed (safety fix 5).
@@ -281,7 +292,50 @@ fn mismatch(old: &Finding, new: &Finding) -> Option<String> {
     if !new.blockers.is_empty() {
         return Some(format!("now blocked: {}", new.blockers.join("; ")));
     }
+    // `Command` findings are sized from tool output (docker, simctl), not from a path: exempt.
+    if new.action != ActionKind::Command {
+        if let Some((was, now)) = kind_change(old, new) {
+            return Some(format!("{CHANGED_SINCE_THE_SCAN}: {was} → {now}, rescan"));
+        }
+        if !size_within_drift(old.bytes, new.bytes) {
+            return Some(format!("{CHANGED_SINCE_THE_SCAN}: {} → {}, rescan", human(old.bytes), human(new.bytes)));
+        }
+    }
     None
+}
+
+/// `new` is within `max(SIZE_DRIFT_PERCENT %, SIZE_DRIFT_MIN_BYTES)` of `old` (either way).
+fn size_within_drift(old: u64, new: u64) -> bool {
+    let allowed = (old / 100).saturating_mul(SIZE_DRIFT_PERCENT).max(SIZE_DRIFT_MIN_BYTES);
+    old.abs_diff(new) <= allowed
+}
+
+/// A file that became a folder or a folder that became a file since the scan, as
+/// `(what the user saw, what is there now)`.
+///
+/// A [`Finding`] records no kind, so the stored side is read from `files`: a single file (or link)
+/// counts itself as its one file, a folder counts the non-directory entries inside it. The current
+/// side is read from disk (`symlink_metadata`, never following links). Flagged: a path that is now
+/// a file although the user saw 0 or several files (it was a folder), and a path that is now a
+/// folder of other than one file although the user saw exactly one (a file, or a folder holding
+/// one file that has gained or lost files since: either way not what the user saw). A file
+/// swapped with a folder holding exactly one file (either way) is not caught here; the size check
+/// still applies. An exact check needs the kind in [`Finding`] (a contract change).
+fn kind_change(old: &Finding, new: &Finding) -> Option<(String, String)> {
+    let meta = std::fs::symlink_metadata(new.path.as_deref()?).ok()?;
+    let folder_of = |n: u64| match n {
+        0 => "an empty folder".to_string(),
+        1 => "a folder of 1 file".to_string(),
+        n => format!("a folder of {n} files"),
+    };
+    if meta.is_dir() {
+        (old.files == 1 && new.files != 1).then(|| ("1 file".to_string(), folder_of(new.files)))
+    } else if old.files != 1 {
+        let now = if meta.file_type().is_symlink() { "a symlink" } else { "a file" };
+        Some((folder_of(old.files), now.to_string()))
+    } else {
+        None
+    }
 }
 
 fn action_name(action: ActionKind) -> &'static str {

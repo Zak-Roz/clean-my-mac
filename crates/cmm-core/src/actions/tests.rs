@@ -908,6 +908,113 @@ fn fresh_blockers_skip_the_item() {
     assert!(fx.home.join("vm/bundle/disk.img").exists());
 }
 
+// ---------------------------------------------------------------------------------------------
+// fresh scan: size and file-vs-folder kind (re-review follow-up after a28953e)
+
+const MIB: usize = 1024 * 1024;
+
+fn fresh_run(fx: &Fx, stored: &ScanReport, f: &Finding, mode: CleanMode) -> CleanResult {
+    let history = History::open(&fx.tmp.path().join("data/history.sqlite")).unwrap();
+    execute_fresh_with(&fx.env, &fx.config(), stored, &req(&[f], mode, false), Some(&history), &|_| {})
+}
+
+#[test]
+fn fresh_size_grown_beyond_the_drift_is_skipped() {
+    let fx = fixture();
+    let stored = fx.stored();
+    let a = by_label(&stored, "a").clone();
+    // After the scan, 12 MiB more land in the folder: more than max(10 %, 10 MiB) of what the user saw.
+    write_file(&fx.home.join("Library/Caches/a/data/new-download"), 12 * MIB);
+    let now = crate::size::Sizer::new().size_of(&fx.home.join("Library/Caches/a")).bytes;
+    let why = format!("changed since the scan: {} → {}, rescan", human(a.bytes), human(now));
+
+    let plan = plan_fresh_with(&fx.env, &fx.config(), &stored, &req(&[&a], CleanMode::Trash, true)).unwrap();
+    assert!(plan.items.is_empty(), "{:?}", plan.items);
+    assert_eq!(plan.warnings, [format!("Skipped {}: {NO_LONGER_MATCHES} ({why})", a.label)]);
+    for mode in [CleanMode::Trash, CleanMode::Delete] {
+        let res = fresh_run(&fx, &stored, &a, mode);
+        assert_eq!(res.items.len(), 1, "{:?}", res.items);
+        assert_eq!(res.items[0].outcome, CleanOutcome::Skipped);
+        assert_eq!(msg(&res.items[0]), format!("skipped: {NO_LONGER_MATCHES} ({why})"));
+        assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (0, 0));
+    }
+    assert!(fx.home.join("Library/Caches/a/data/new-download").exists());
+    assert!(fs::read_dir(fx.trash()).unwrap().next().is_none(), "nothing went to the Trash");
+}
+
+#[test]
+fn fresh_small_size_drift_is_acted_on() {
+    let fx = fixture();
+    let stored = fx.stored();
+    let a = by_label(&stored, "a").clone();
+    // A cache that keeps growing a little (2 MiB, one more file) is still the folder the user saw.
+    write_file(&fx.home.join("Library/Caches/a/data/more"), 2 * MIB);
+    let res = fresh_run(&fx, &stored, &a, CleanMode::Trash);
+    assert_done!(res.items[0], "{:?}", res.items);
+    assert_eq!(res.items.len(), 1);
+    assert!(!fx.home.join("Library/Caches/a").exists() && fx.trash().join("a/data/more").exists());
+}
+
+#[test]
+fn fresh_file_replaced_by_a_folder_and_back_is_skipped() {
+    let fx = fixture();
+    let stored = fx.stored();
+    let (a, c) = (by_label(&stored, "a").clone(), by_label(&stored, "c.bin").clone());
+    assert_eq!((a.files, c.files), (2, 1));
+    // Same paths, similar sizes: `c.bin` (a file) is now a folder of two files, `a` (a folder of two
+    // files) is now a single file.
+    let caches = fx.home.join("Library/Caches");
+    fs::remove_file(caches.join("c.bin")).unwrap();
+    write_file(&caches.join("c.bin/one"), 50);
+    write_file(&caches.join("c.bin/two"), 50);
+    fs::remove_dir_all(caches.join("a")).unwrap();
+    write_file(&caches.join("a"), 1010);
+
+    for (f, why) in [(&c, "1 file → a folder of 2 files"), (&a, "a folder of 2 files → a file")] {
+        for mode in [CleanMode::Trash, CleanMode::Delete] {
+            let res = fresh_run(&fx, &stored, f, mode);
+            assert_eq!(res.items[0].outcome, CleanOutcome::Skipped, "{:?}", res.items);
+            assert_eq!(
+                msg(&res.items[0]),
+                format!("skipped: {NO_LONGER_MATCHES} (changed since the scan: {why}, rescan)")
+            );
+        }
+    }
+    assert!(caches.join("c.bin/one").is_file() && caches.join("a").is_file());
+}
+
+#[test]
+fn size_drift_is_ten_percent_or_ten_mib_either_way() {
+    let mib = MIB as u64;
+    assert!(size_within_drift(0, 10 * mib) && !size_within_drift(0, 10 * mib + 1));
+    assert!(size_within_drift(10 * mib, 0) && !size_within_drift(10 * mib + 1, 0));
+    assert!(size_within_drift(200 * mib, 220 * mib) && !size_within_drift(200 * mib, 220 * mib + 1));
+    assert!(size_within_drift(200 * mib, 180 * mib) && !size_within_drift(200 * mib, 180 * mib - 1));
+    assert!(size_within_drift(u64::MAX, u64::MAX - 1));
+}
+
+/// `Command` findings are sized from tool output (`docker system df`, simctl): a different size or
+/// a missing path never makes them stale; the same drift on a path finding does.
+#[test]
+fn command_findings_are_exempt_from_the_size_and_kind_check() {
+    let fx = fixture();
+    let docker = with_command(
+        finding("tool.docker", None, 1_000_000_000, ActionKind::Command),
+        &["docker", "system", "prune", "-f"],
+    );
+    let mut grown = docker.clone();
+    grown.bytes = 5_000_000_000;
+    grown.files = 0;
+    assert_eq!(mismatch(&docker, &grown), None);
+
+    let dir = fx.home.join("Library/Caches/a");
+    let path = finding("cache.test", Some(&dir), 1_000_000_000, ActionKind::Trash);
+    let mut path_grown = path.clone();
+    path_grown.bytes = 5_000_000_000;
+    assert_eq!(mismatch(&path, &path_grown).as_deref(), Some("changed since the scan: 1.0 GB → 5.0 GB, rescan"));
+    assert_eq!(mismatch(&path, &path), None);
+}
+
 /// Moves a temp file to the real Trash via NSFileManager. Ignored by default because it modifies
 /// `~/.Trash`; run with `cargo test -p cmm-core trash_moves_item -- --ignored`.
 #[test]
