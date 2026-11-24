@@ -22,14 +22,6 @@ pub struct DockerDetector;
 
 const DOCKER_RAW: &str = "Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw";
 
-/// Where the `docker` CLI usually lives; GUI apps get a minimal `PATH` without `/usr/local/bin`.
-const DOCKER_CANDIDATES: &[&str] = &[
-    "docker",
-    "/usr/local/bin/docker",
-    "/opt/homebrew/bin/docker",
-    "/Applications/Docker.app/Contents/Resources/bin/docker",
-];
-
 /// One line of `docker system df --format '{{json .}}'`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -139,32 +131,23 @@ fn raw_path(rule: &RuleDef, ctx: &ScanContext) -> PathBuf {
 impl Detector for DockerDetector {
     fn detect(&self, rule: &RuleDef, ctx: &ScanContext) -> Result<Vec<Finding>, CoreError> {
         let raw = raw_path(rule, ctx);
-        let mut missing = None;
-        for program in DOCKER_CANDIDATES {
-            let df = match external::run(program, &["system", "df", "--format", "{{json .}}"]) {
-                Ok(out) => out,
-                Err(e) => {
-                    missing.get_or_insert(e);
-                    continue;
-                }
-            };
-            if !df.success() {
-                if is_not_running(&df.stderr) {
-                    return Ok(not_running_finding(rule, ctx, &raw).into_iter().collect());
-                }
-                let first = df.stderr.lines().next().unwrap_or("").trim().to_string();
-                return Err(CoreError::Command(format!("`docker system df` failed: {first}")));
+        // `docker` is resolved in the shared tool directories (incl. Docker.app's bundled CLI).
+        let df = match external::run("docker", &["system", "df", "--format", "{{json .}}"]) {
+            Ok(out) => out,
+            // No CLI at all: still show the disk image if Docker Desktop left one behind.
+            Err(missing) => return not_running_finding(rule, ctx, &raw).map(|f| vec![f]).ok_or(missing),
+        };
+        if !df.success() {
+            if is_not_running(&df.stderr) {
+                return Ok(not_running_finding(rule, ctx, &raw).into_iter().collect());
             }
-            let dangling = external::run(program, &["images", "--filter", "dangling=true", "--format", "{{.Size}}"])
-                .map(|o| o.stdout)
-                .unwrap_or_default();
-            return Ok(prune_finding(rule, &df.stdout, &dangling)?.into_iter().collect());
+            let first = df.stderr.lines().next().unwrap_or("").trim().to_string();
+            return Err(CoreError::Command(format!("`docker system df` failed: {first}")));
         }
-        // No CLI at all: still show the disk image if Docker Desktop left one behind.
-        match not_running_finding(rule, ctx, &raw) {
-            Some(f) => Ok(vec![f]),
-            None => Err(missing.unwrap_or_else(|| CoreError::Command("`docker` not found".into()))),
-        }
+        let dangling = external::run("docker", &["images", "--filter", "dangling=true", "--format", "{{.Size}}"])
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        Ok(prune_finding(rule, &df.stdout, &dangling)?.into_iter().collect())
     }
 }
 

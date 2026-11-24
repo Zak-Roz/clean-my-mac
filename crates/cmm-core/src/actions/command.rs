@@ -1,18 +1,14 @@
-//! Allowlisted external commands with a timeout (ARCHITECTURE.md §6.4).
+//! Allowlisted external commands (ARCHITECTURE.md §6.4). Programs are resolved and run by the
+//! shared helpers in [`crate::process`] (contract v2: one timed runner, one resolver).
 
-use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::process;
 
 /// The only programs a `Command` / `GitWorktreeRemove` action may run. Matched exactly against
 /// `argv[0]`, which must be a bare name (no path): `/tmp/x/git` is refused.
 pub const COMMAND_ALLOWLIST: &[&str] = &["xcrun", "docker", "git", "tmutil", "brew", "npm", "pnpm", "yarn"];
-
-/// Searched after `$PATH`: GUI apps start with a minimal PATH that lacks Homebrew and Docker.
-const FALLBACK_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 /// Errors unless `program` is on the allowlist.
 pub(crate) fn check_allowed(program: &str) -> Result<(), String> {
@@ -23,21 +19,11 @@ pub(crate) fn check_allowed(program: &str) -> Result<(), String> {
     }
 }
 
-/// Allowlist check, then the absolute path of the executable.
+/// Allowlist check, then the absolute path of the executable in [`process::TOOL_DIRS`]
+/// (never `$PATH`).
 pub(crate) fn resolve_allowed(program: &str) -> Result<PathBuf, String> {
     check_allowed(program)?;
-    let path_dirs = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
-    path_dirs
-        .into_iter()
-        .chain(FALLBACK_DIRS.iter().map(PathBuf::from))
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(program))
-        .find(|candidate| is_executable(candidate))
-        .ok_or_else(|| format!("`{program}` not found"))
-}
-
-fn is_executable(path: &Path) -> bool {
-    path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    process::resolve_tool(program).map_err(|_| format!("`{program}` not found"))
 }
 
 pub(crate) struct Output {
@@ -47,61 +33,19 @@ pub(crate) struct Output {
     pub stderr: String,
 }
 
-/// Runs `program args…` (stdin closed, own process group), killing the whole group after `timeout`.
+/// Runs the absolute `program` with `args` through [`process::run_with_timeout`] (stdin closed, own
+/// process group killed after `timeout`), with output as text.
 pub(crate) fn run_with_timeout(program: &Path, args: &[String], timeout: Duration) -> Result<Output, String> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", program.display()))?;
-
-    let reader = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut buf);
-            }
-            String::from_utf8_lossy(&buf).into_owned()
-        })
-    };
-    let stdout = reader(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let stderr = reader(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if Instant::now() >= deadline => {
-                kill_group(&mut child);
-                let _ = child.wait();
-                break Err(format!("timed out after {}s", timeout.as_secs_f32()));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => {
-                kill_group(&mut child);
-                let _ = child.wait();
-                break Err(format!("wait failed: {e}"));
-            }
-        }
-    };
-    let stdout = stdout.join().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
-    let status = status?;
-    Ok(Output { success: status.success(), code: status.code(), stdout, stderr })
-}
-
-fn kill_group(child: &mut std::process::Child) {
-    if let Ok(pid) = i32::try_from(child.id()) {
-        // SAFETY: plain syscall; the child leads its own process group (process_group(0)).
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
-    let _ = child.kill();
+    let out = process::run_with_timeout(program, args, timeout).map_err(|e| match e {
+        crate::error::CoreError::Command(m) => m,
+        other => other.to_string(),
+    })?;
+    Ok(Output {
+        success: out.status.success(),
+        code: out.status.code(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
 }
 
 /// Shell-like rendering for messages: `docker system prune -f`.
@@ -121,6 +65,8 @@ pub(crate) fn tail(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
 
     #[test]

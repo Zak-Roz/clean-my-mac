@@ -1,22 +1,21 @@
-//! Read-only external tool invocation with a hard timeout (owned by S2).
+//! Read-only external tool invocation for the S2 detectors (owned by S2).
 //!
-//! Every detector that shells out (`git`, `xcrun`, `docker`) goes through [`run`]: stdin is closed,
-//! output is captured, the child is killed after the timeout, and a missing tool is a
+//! A thin wrapper over the one timed runner, [`crate::process::run_with_timeout`] (contract v2):
+//! tools are resolved to absolute paths in [`crate::process::TOOL_DIRS`], stdin is closed, output
+//! is captured as text, the process group is killed after [`TIMEOUT`], and a missing tool is a
 //! `CoreError::Command` (never a panic). `GIT_OPTIONAL_LOCKS=0` keeps `git status` from rewriting
 //! the index, so scans stay read-only.
 
-use std::io::Read;
-use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::ExitStatus;
+use std::time::Duration;
 
 use crate::error::CoreError;
+use crate::process::{TOOL_TIMEOUT, run_with_timeout};
 
 /// Upper bound for any single external command (ARCHITECTURE.md §10).
-pub const TIMEOUT: Duration = Duration::from_secs(20);
+pub const TIMEOUT: Duration = TOOL_TIMEOUT;
 
-/// Captured result of a finished command.
+/// Captured result of a finished command, as (lossy UTF-8) text.
 #[derive(Debug, Clone)]
 pub struct Output {
     pub status: ExitStatus,
@@ -31,73 +30,23 @@ impl Output {
 }
 
 fn describe(program: &str, args: &[&str]) -> String {
-    let mut text = program.to_string();
-    for arg in args {
-        text.push(' ');
-        text.push_str(arg);
-    }
-    text
+    std::iter::once(program).chain(args.iter().copied()).collect::<Vec<_>>().join(" ")
 }
 
-fn read_all(mut pipe: impl Read + Send + 'static) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = pipe.read_to_end(&mut buf);
-        buf
-    })
-}
-
-/// Runs `program args…` (optionally in `cwd`) and waits at most `timeout`. A non-zero exit is
-/// returned as `Ok` — callers decide what it means; spawn failures and timeouts are errors.
-pub fn run_in(program: &str, args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Output, CoreError> {
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C");
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    let mut child = cmd.spawn().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => CoreError::Command(format!("`{program}` not found")),
-        _ => CoreError::Command(format!("cannot run `{}`: {e}", describe(program, args))),
-    })?;
-    let stdout = child.stdout.take().map(read_all);
-    let stderr = child.stderr.take().map(read_all);
-
-    let started = Instant::now();
-    let mut pause = Duration::from_millis(1);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(CoreError::Command(format!(
-                    "`{}` timed out after {} s",
-                    describe(program, args),
-                    timeout.as_secs()
-                )));
-            }
-            Ok(None) => {
-                thread::sleep(pause);
-                pause = (pause * 2).min(Duration::from_millis(25));
-            }
-            Err(e) => return Err(CoreError::Command(format!("waiting for `{}`: {e}", describe(program, args)))),
-        }
-    };
-    let collect = |h: Option<thread::JoinHandle<Vec<u8>>>| {
-        h.and_then(|h| h.join().ok()).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
-    };
-    Ok(Output { status, stdout: collect(stdout), stderr: collect(stderr) })
-}
-
-/// [`run_in`] without a working directory, with the default [`TIMEOUT`].
+/// Runs `program args…` with the default [`TIMEOUT`]. A non-zero exit is returned as `Ok` —
+/// callers decide what it means; a missing tool, spawn failures and timeouts are errors.
 pub fn run(program: &str, args: &[&str]) -> Result<Output, CoreError> {
-    run_in(program, args, None, TIMEOUT)
+    let out = run_with_timeout(program, args, TIMEOUT).map_err(|e| match e {
+        CoreError::Command(m) if m.contains("timed out") => {
+            CoreError::Command(format!("`{}` timed out after {} s", describe(program, args), TIMEOUT.as_secs()))
+        }
+        other => other,
+    })?;
+    Ok(Output {
+        status: out.status,
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
 }
 
 /// Like [`run`], but a non-zero exit becomes `CoreError::Command` with the first stderr line.
@@ -117,11 +66,11 @@ mod tests {
 
     #[test]
     fn captures_output_and_status() {
-        let out = run("sh", &["-c", "echo hi; echo err >&2; exit 3"]).unwrap();
+        let out = run("/bin/sh", &["-c", "echo hi; echo err >&2; exit 3"]).unwrap();
         assert_eq!(out.stdout, "hi\n");
         assert_eq!(out.stderr, "err\n");
         assert_eq!(out.status.code(), Some(3));
-        let err = run_ok("sh", &["-c", "echo boom >&2; exit 1"]).unwrap_err().to_string();
+        let err = run_ok("/bin/sh", &["-c", "echo boom >&2; exit 1"]).unwrap_err().to_string();
         assert!(err.contains("boom"), "{err}");
     }
 
@@ -132,16 +81,15 @@ mod tests {
     }
 
     #[test]
-    fn timeout_kills_the_child() {
-        let started = Instant::now();
-        let err = run_in("sleep", &["5"], None, Duration::from_millis(200)).unwrap_err().to_string();
-        assert!(err.contains("timed out"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(3));
+    fn bare_names_resolve_to_tool_dirs() {
+        // `git` is found in /usr/bin (or Homebrew), not through $PATH.
+        let out = run("git", &["--version"]).unwrap();
+        assert!(out.success() && out.stdout.starts_with("git version"), "{out:?}");
     }
 
     #[test]
     fn large_output_does_not_deadlock() {
-        let out = run("sh", &["-c", "yes x | head -c 1000000"]).unwrap();
+        let out = run("/bin/sh", &["-c", "yes x | head -c 1000000"]).unwrap();
         assert_eq!(out.stdout.len(), 1_000_000);
     }
 }
