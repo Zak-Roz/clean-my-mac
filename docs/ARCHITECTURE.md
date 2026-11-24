@@ -104,10 +104,12 @@ pub struct ScanProgress { pub phase: ScanPhase, pub rule_id: Option<String>, pub
 
 pub enum CleanMode { Trash, Delete }
 pub struct CleanRequest { pub finding_ids: Vec<String>, pub mode: CleanMode, pub dry_run: bool }
-pub struct CleanItemResult { pub finding_id: String, pub ok: bool, pub bytes: u64, pub message: Option<String> }
+pub enum CleanOutcome { Done, Skipped, Failed }   // contract v2: replaces `ok: bool`
+pub struct CleanItemResult { pub finding_id: String, pub outcome: CleanOutcome, pub bytes: u64, pub message: Option<String> }
 pub struct CleanResult { pub dry_run: bool, pub mode: CleanMode, pub items: Vec<CleanItemResult>, pub freed_bytes: u64, pub moved_to_trash_bytes: u64 }
 
-pub struct GrowthItem { pub key: String, pub label: String, pub bytes_then: u64, pub bytes_now: u64, pub delta: i64 }
+pub enum GrowthKind { Rule, Item }               // contract v2
+pub struct GrowthItem { pub kind: GrowthKind, pub key: String, pub label: String, pub bytes_then: u64, pub bytes_now: u64, pub delta: i64 }
 pub struct FreeSpacePoint { pub at: DateTime<Utc>, pub free_bytes: u64 }
 ```
 
@@ -307,7 +309,29 @@ conflict waiting to happen — report the need instead.
 - CLI layout: one file per subcommand in `crates/cmm-cli/src/cmd/<name>.rs`; `main.rs` only parses and dispatches.
   `cmm scan` records the report to history unless `--no-record` (ignore `CoreError::Unimplemented` until S3 lands).
 - S2 may add one-line `mod` declarations to `detectors/mod.rs` for its own helper files; everything else in that file is S1's.
-- Run pnpm as `corepack pnpm …` (global pnpm shim is broken on this machine); `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` for non-interactive runs.
+- Run pnpm as `corepack pnpm …`
+
+### Contract v2 (integration of S1–S4)
+
+- `CleanItemResult.ok` → `outcome: CleanOutcome { Done, Skipped, Failed }`; history `actions.ok` → `actions.outcome TEXT`
+  (no history DB exists on disk yet, so schema v1 is edited in place, no migration).
+- `GrowthItem.kind: GrowthKind { Rule, Item }`; the UI no longer parses `:` in keys.
+- `lib.rs` re-exports `scan_at`.
+- `min_finding_bytes` does not apply to `Command` and `InfoOnly` findings (zero-byte `git worktree prune`, blocked runtimes).
+- **Worktree removal follows the clean mode.** `Trash`: guard-check the worktree folder, move it to the Trash, then run
+  `git -C <repo> worktree prune` (ignored files like `.env` stay recoverable). `Delete`: run the finding's
+  `git … worktree remove <path>` argv (never `--force`). The branch and its commits stay in git either way.
+  A worktree's `.git` **file** (gitdir pointer) does not trip the guard's `.git` rule; only `.git` directories do.
+- `Command` findings free space immediately whatever the mode. `Trash` frees nothing until the Trash is emptied.
+- One timed process runner: `process::run_with_timeout` (S1). S2's `detectors::external::run` becomes a thin wrapper or goes away.
+- Allowlisted programs are resolved to absolute paths (`/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`,
+  `/Applications/Docker.app/Contents/Resources/bin`) because a Finder-launched app has a minimal `PATH` — shared
+  by detectors and the executor.
+- Detectors report partial root failures through `ScanContext::warn` instead of swallowing them.
+- History records only unfiltered scans (`cmm scan` without `--category`/`--rule`, and the app's full scan).
+- The desktop app persists the last report to `data_dir/last-report.json` and loads it at startup.
+- No "Empty Trash" action for now (it would also erase unrelated user files); the app offers `reveal_trash()`
+  (opens `~/.Trash` in Finder) instead. (global pnpm shim is broken on this machine); `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` for non-interactive runs.
 
 Quality bar for every stream: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace`; desktop also `pnpm -w lint` and `pnpm -w typecheck`. Filesystem tests use
