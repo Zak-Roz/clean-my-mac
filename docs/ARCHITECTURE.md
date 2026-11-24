@@ -296,6 +296,17 @@ conflict waiting to happen — report the need instead.
 - **S1 adds `scan_at(home: &Path, …)`** with the same signature as `scan` plus `home`; `scan()` delegates with the real home. All scan tests use `scan_at` on a tempdir.
 - u64 is emitted as TS `number` (`TS_RS_LARGE_INT=number`); bindings regenerate on any `cargo test`. Never write a literal `*/` inside `///` comments in `model.rs` (breaks the generated JSDoc).
 - Aerial wallpaper videos on this macOS version live **inside** home: `~/Library/Application Support/com.apple.wallpaper/aerials/videos` (often tens of GB) — a `paths` rule, review, trash.
+- **Nested findings** (e.g. a stale `node_modules` inside a worktree that is itself a finding):
+  `scan_at` post-processing drops a nested finding when an ancestor finding has **no** blockers (the parent covers it),
+  and keeps it when the ancestor is blocked (so the child can still be cleaned alone). `actions::execute` skips a
+  selected item whose path is inside another selected item ("covered by parent"). UI totals de-duplicate the same way.
+- `GitWorktreeRemove` findings carry `command = ["git", "-C", <main repo>, "worktree", "remove", <worktree path>]`;
+  the executor runs that argv after the allowlist check and a fresh `git status --porcelain` re-check.
+- External tools (`git`, `xcrun`, `docker`, `mdls`) run through a timeout (≤ 20 s); a missing or failing tool yields
+  no findings plus a `ScanError`, never a panic.
+- CLI layout: one file per subcommand in `crates/cmm-cli/src/cmd/<name>.rs`; `main.rs` only parses and dispatches.
+  `cmm scan` records the report to history unless `--no-record` (ignore `CoreError::Unimplemented` until S3 lands).
+- S2 may add one-line `mod` declarations to `detectors/mod.rs` for its own helper files; everything else in that file is S1's.
 - Run pnpm as `corepack pnpm …` (global pnpm shim is broken on this machine); `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` for non-interactive runs.
 
 Quality bar for every stream: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
