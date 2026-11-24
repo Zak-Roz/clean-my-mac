@@ -11,8 +11,10 @@ corepack pnpm --filter desktop screenshots   # with dev:mock running: regenerate
 
 ## Layout
 
-- `src-tauri/src/commands.rs` — the §7 commands over `cmm-core`; blocking work on `spawn_blocking`,
-  history opened lazily at `data_dir/history.sqlite`, core errors returned as readable strings.
+- `src-tauri/src/commands.rs` — the §7 commands over `cmm-core` plus `reveal_trash`; blocking work on
+  `spawn_blocking`, history opened lazily at `data_dir/history.sqlite` (full scans only), the last
+  full scan persisted to `data_dir/last-report.json` and loaded at startup, core errors returned as
+  readable strings.
 - `src/api.ts` — typed wrappers; `src/mock.ts` replaces them when `VITE_MOCK=1` (simulated scan
   progress, plan/execute with one blocked and one failing item, ~90 days of synthetic history).
 - `src/state.tsx` — app state (volume, report, progress, selection) behind `useApp()`.

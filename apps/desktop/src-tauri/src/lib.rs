@@ -17,6 +17,7 @@ pub fn run() {
             commands::history_growth,
             commands::history_free_space,
             commands::reveal_in_finder,
+            commands::reveal_trash,
             commands::open_full_disk_access_settings,
         ])
         .run(tauri::generate_context!())

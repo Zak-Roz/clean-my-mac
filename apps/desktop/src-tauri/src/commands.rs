@@ -1,6 +1,10 @@
 //! Tauri commands (ARCHITECTURE.md §7). All async, errors as readable `String`s.
 //! Events: "scan://progress" (ScanProgress), "clean://item" (CleanItemResult).
 //!
+//! The last full scan is persisted to `data_dir/last-report.json` (contract v2): written after each
+//! full scan and after a real clean prunes it, loaded at startup; a missing or unreadable file just
+//! means "no scan yet".
+//!
 //! Everything that touches the disk or SQLite runs on a blocking thread so the webview never stalls.
 //! Core functions that are still skeleton stubs surface as `"not implemented: …"` errors, which the
 //! UI shows as "not available in this build yet" instead of failing.
@@ -26,6 +30,9 @@ pub const CLEAN_ITEM_EVENT: &str = "clean://item";
 /// System Settings › Privacy & Security › Full Disk Access.
 const FULL_DISK_ACCESS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
 
+/// File name of the persisted last report inside `data_dir`.
+pub const LAST_REPORT_FILE: &str = "last-report.json";
+
 pub struct AppState {
     pub config: Config,
     pub last_report: Mutex<Option<ScanReport>>,
@@ -36,10 +43,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// State with the persisted last report (if any) already loaded.
     pub fn new(config: Config) -> Self {
+        let last_report = load_report(&config.data_dir.join(LAST_REPORT_FILE));
         Self {
             config,
-            last_report: Mutex::new(None),
+            last_report: Mutex::new(last_report),
             history: Mutex::new(None),
             scanning: AtomicBool::new(false),
             cleaning: AtomicBool::new(false),
@@ -52,6 +61,14 @@ impl AppState {
 
     fn history_path(&self) -> PathBuf {
         self.config.data_dir.join("history.sqlite")
+    }
+
+    /// Persists `report` as the last report; a failure is logged, never fatal.
+    fn persist_report(&self, report: &ScanReport) {
+        let path = self.config.data_dir.join(LAST_REPORT_FILE);
+        if let Err(e) = save_report(&path, report) {
+            eprintln!("cmm: last report not saved to {}: {e}", path.display());
+        }
     }
 
     /// Runs `f` with the history database, opening it first if needed. Blocking: call from a
@@ -90,6 +107,29 @@ impl Drop for BusyGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
+}
+
+/// Reads a persisted report. Missing, unreadable or outdated (does not match the model) → `None`.
+fn load_report(path: &Path) -> Option<ScanReport> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!("cmm: ignoring {}: {e}", path.display());
+            return None;
+        }
+    };
+    serde_json::from_slice(&bytes).map_err(|e| eprintln!("cmm: ignoring unreadable {}: {e}", path.display())).ok()
+}
+
+/// Writes `report` atomically (temp file in the same directory, then rename).
+fn save_report(path: &Path, report: &ScanReport) -> Result<(), String> {
+    let dir = path.parent().ok_or("no parent directory")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let json = serde_json::to_vec(report).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 fn core_err(e: CoreError) -> String {
@@ -154,10 +194,11 @@ pub async fn start_scan(app: AppHandle, opts: ScanOptions) -> Result<ScanReport,
         });
         // History compares whole scans, so only unfiltered ones are recorded (contract v2). It is
         // a nice-to-have: a failure here must not lose the scan.
-        if cmm_core::scan::is_full_scan(&opts)
-            && let Err(e) = state.with_history(|h| h.record_scan(&report))
-        {
-            eprintln!("cmm: scan not recorded to history: {e}");
+        if cmm_core::scan::is_full_scan(&opts) {
+            if let Err(e) = state.with_history(|h| h.record_scan(&report)) {
+                eprintln!("cmm: scan not recorded to history: {e}");
+            }
+            state.persist_report(&report);
         }
         *state.last_report.lock().map_err(|e| e.to_string())? = Some(report.clone());
         Ok(report)
@@ -200,8 +241,11 @@ pub async fn execute_clean(app: AppHandle, req: CleanRequest) -> Result<CleanRes
                 actions::execute(&report, &req, None, &emit)
             }
         };
-        if let Some(stored) = state.last_report.lock().map_err(|e| e.to_string())?.as_mut() {
+        if let Some(stored) = state.last_report.lock().map_err(|e| e.to_string())?.as_mut()
+            && !result.dry_run
+        {
             prune_cleaned(stored, &result);
+            state.persist_report(stored);
         }
         Ok(result)
     })
@@ -228,6 +272,19 @@ pub async fn reveal_in_finder(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let p = validate_reveal_path(&path)?;
         run_open(&["-R".as_ref(), p.as_os_str()])
+    })
+    .await
+    .map_err(join_err)?
+}
+
+/// Opens `~/.Trash` in Finder (contract v2: there is no "Empty Trash" action; emptying it would
+/// also erase unrelated files, so the user does that in Finder).
+#[tauri::command]
+pub async fn reveal_trash() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let trash = home_dir().join(".Trash");
+        let p = validate_reveal_path(trash.to_str().ok_or("home path is not UTF-8")?)?;
+        run_open(&[p.as_os_str()])
     })
     .await
     .map_err(join_err)?
@@ -303,6 +360,27 @@ mod tests {
             assert_eq!(BusyGuard::acquire(&flag, "a scan").err().unwrap(), "a scan is already running");
         }
         assert!(BusyGuard::acquire(&flag, "a scan").is_ok());
+    }
+
+    #[test]
+    fn last_report_round_trips_and_tolerates_missing_or_corrupt_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config { data_dir: dir.path().join("data"), ..Config::default() };
+        let path = config.data_dir.join(LAST_REPORT_FILE);
+
+        // Missing data dir and file: no report, no panic.
+        assert!(AppState::new(config.clone()).last_report_clone().unwrap().is_none());
+
+        let report = fixture();
+        save_report(&path, &report).unwrap();
+        assert!(!path.with_extension("json.tmp").exists(), "temp file renamed away");
+        let loaded = AppState::new(config.clone()).last_report_clone().unwrap().expect("loaded at startup");
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&report).unwrap());
+
+        for corrupt in [&b"{ not json"[..], b"", br#"{"id": "x"}"#] {
+            std::fs::write(&path, corrupt).unwrap();
+            assert!(AppState::new(config.clone()).last_report_clone().unwrap().is_none());
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ import type { CleanPlan } from "../bindings/CleanPlan";
 import type { CleanResult } from "../bindings/CleanResult";
 import type { Finding } from "../bindings/Finding";
 import { CheckCircleIcon, InfoIcon, MinusCircleIcon, TrashIcon, WarningIcon, XCircleIcon } from "../components/icons";
+import { ShowTrashButton } from "../components/trash";
 import { Button, Callout, cx, RiskBadge, Spinner } from "../components/ui";
 import { actionDescription, doneDescription, isPermanentAction, isSelectable } from "../lib/findings";
 import { errorMessage, formatBytes, formatCount, isNotImplemented, stubDetail, tildify } from "../lib/format";
@@ -313,8 +314,12 @@ function ResultSummary({ result }: { result: CleanResult }) {
         />
       </div>
       {result.movedToTrashBytes > 0 && (
-        <Callout tone="info" title={`${formatBytes(result.movedToTrashBytes)} is in the Trash`}>
-          It still takes up disk space. Empty the Trash in Finder to get it back.
+        <Callout
+          tone="info"
+          title={`${formatBytes(result.movedToTrashBytes)} is in the Trash`}
+          action={<ShowTrashButton />}
+        >
+          It still takes up disk space until you empty the Trash in Finder.
         </Callout>
       )}
     </div>

@@ -31,6 +31,8 @@ export interface Api {
   historyGrowth(days: number): Promise<GrowthItem[]>;
   historyFreeSpace(days: number): Promise<FreeSpacePoint[]>;
   revealInFinder(path: string): Promise<void>;
+  /** Opens ~/.Trash in Finder (there is no Empty Trash action). */
+  revealTrash(): Promise<void>;
   openFullDiskAccessSettings(): Promise<void>;
   onScanProgress(handler: (progress: ScanProgress) => void): Promise<UnlistenFn>;
   onCleanItem(handler: (item: CleanItemResult) => void): Promise<UnlistenFn>;
@@ -46,6 +48,7 @@ const tauriApi: Api = {
   historyGrowth: (days) => invoke<GrowthItem[]>("history_growth", { days }),
   historyFreeSpace: (days) => invoke<FreeSpacePoint[]>("history_free_space", { days }),
   revealInFinder: (path) => invoke<void>("reveal_in_finder", { path }),
+  revealTrash: () => invoke<void>("reveal_trash"),
   openFullDiskAccessSettings: () => invoke<void>("open_full_disk_access_settings"),
   onScanProgress: (handler) => listen<ScanProgress>(SCAN_PROGRESS_EVENT, (e) => handler(e.payload)),
   onCleanItem: (handler) => listen<CleanItemResult>(CLEAN_ITEM_EVENT, (e) => handler(e.payload)),

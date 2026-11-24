@@ -5,6 +5,7 @@ import type { VolumeInfo } from "../bindings/VolumeInfo";
 import { CapacityBar, FreeSpaceChart } from "../components/charts";
 import { InfoIcon, LockIcon, MemoryIcon, SparkIcon, TrashIcon } from "../components/icons";
 import { lastScanLine, ScanButton, ScreenFrame } from "../components/layout";
+import { ShowTrashButton } from "../components/trash";
 import { Button, Callout, Card, CardHeader, cx, StatusPill, Tip } from "../components/ui";
 import { dedupedTotal, isSelectable } from "../lib/findings";
 import { errorMessage, formatBytes, formatDelta, isNotImplemented, stubDetail } from "../lib/format";
@@ -178,10 +179,13 @@ function TrashTile({ volume }: { volume: VolumeInfo | null }) {
       <Tile icon={<TrashIcon />} title="Trash">
         <span className="text-[22px] leading-tight font-semibold">{trash === 0 ? "Empty" : formatBytes(trash)}</span>
         <p className="text-[12px] leading-snug text-fg-2">
-          {trash === 0
-            ? "Nothing waiting in the Trash."
-            : "Still uses disk space. Empty the Trash in Finder to get it back."}
+          {trash === 0 ? "Nothing waiting in the Trash." : "Still uses disk space until you empty the Trash in Finder."}
         </p>
+        {trash > 0 && (
+          <div className="mt-auto">
+            <ShowTrashButton />
+          </div>
+        )}
       </Tile>
     );
   }

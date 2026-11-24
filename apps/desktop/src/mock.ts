@@ -186,6 +186,7 @@ export function createMockApi(): Api {
       return [...syntheticFreeSpace(days, base), ...recordedScans.filter((p) => Date.parse(p.at) >= cutoff)];
     },
     revealInFinder: async (path) => console.info("[mock] reveal in Finder:", path),
+    revealTrash: async () => console.info("[mock] show Trash in Finder"),
     openFullDiskAccessSettings: async () => {
       console.info("[mock] open Full Disk Access settings (granting it)");
       fullDiskAccess = true;
