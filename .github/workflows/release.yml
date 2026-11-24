@@ -106,6 +106,10 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
+      # turbo looks for a `pnpm` binary on PATH, which `corepack pnpm …` alone does not provide.
+      - name: Put pnpm on PATH
+        run: corepack enable pnpm
+
       - name: Install JavaScript dependencies
         run: corepack pnpm install --frozen-lockfile
 
