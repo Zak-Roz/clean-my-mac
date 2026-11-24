@@ -18,6 +18,16 @@ pub struct Config {
     pub keep_versions: u32,
     /// Smaller findings are dropped from the report.
     pub min_finding_bytes: u64,
+    /// Passive monitoring: the menu bar item turns to its warning state, and a background scan
+    /// notifies, when free space is below this many bytes (decimal, like Finder: 50 GB).
+    pub low_space_threshold_bytes: u64,
+    /// A background scan notifies when one finding grew by more than this many bytes within
+    /// `growth_alert_days` (5 GB).
+    pub growth_alert_bytes: u64,
+    /// Window for `growth_alert_bytes` and for the menu bar's "grew recently" list (7 days).
+    pub growth_alert_days: u32,
+    /// Background scans (`cmm scan --notify`, run by the LaunchAgent) post macOS notifications.
+    pub notifications: bool,
     /// `~/Library/Application Support/clean-my-mac`. Not read from `config.toml`.
     #[serde(skip)]
     pub data_dir: PathBuf,
@@ -31,6 +41,10 @@ impl Default for Config {
             installers_older_than_days: 7,
             keep_versions: 1,
             min_finding_bytes: 50 * 1024 * 1024,
+            low_space_threshold_bytes: 50_000_000_000,
+            growth_alert_bytes: 5_000_000_000,
+            growth_alert_days: 7,
+            notifications: true,
             data_dir: default_data_dir(),
         }
     }
@@ -78,6 +92,10 @@ mod tests {
         let config = Config::load_from(&dir.path().join("config.toml")).unwrap();
         assert_eq!(config.stale_days, 60);
         assert_eq!(config.min_finding_bytes, 50 * 1024 * 1024);
+        assert_eq!(config.low_space_threshold_bytes, 50_000_000_000);
+        assert_eq!(config.growth_alert_bytes, 5_000_000_000);
+        assert_eq!(config.growth_alert_days, 7);
+        assert!(config.notifications);
         assert_eq!(config.data_dir, dir.path());
     }
 
@@ -90,5 +108,17 @@ mod tests {
         assert_eq!(config.stale_days, 90);
         assert_eq!(config.keep_versions, 2);
         assert_eq!(config.downloads_older_than_days, 30);
+    }
+
+    #[test]
+    fn monitoring_fields_are_optional_and_overridable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "low_space_threshold_bytes = 80_000_000_000\nnotifications = false\n").unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.low_space_threshold_bytes, 80_000_000_000);
+        assert!(!config.notifications);
+        assert_eq!(config.growth_alert_bytes, 5_000_000_000);
+        assert_eq!(config.growth_alert_days, 7);
     }
 }

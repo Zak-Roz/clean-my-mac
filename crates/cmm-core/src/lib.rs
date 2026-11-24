@@ -1,12 +1,14 @@
 //! clean-my-mac core library. See docs/ARCHITECTURE.md for the contract.
 
 pub mod actions;
+pub mod agent;
 pub mod config;
 pub mod detectors;
 pub mod error;
 pub mod guard;
 pub mod history;
 pub mod model;
+pub mod monitor;
 pub mod process;
 pub mod rules;
 pub mod scan;

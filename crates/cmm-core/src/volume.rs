@@ -20,6 +20,12 @@ pub fn volume_info(home: &Path) -> VolumeInfo {
     }
 }
 
+/// `(total, free)` bytes of the volume holding `home`: one `statfs`, no Trash walk, cheap enough
+/// for a menu bar refresh. `None` if `statfs` fails. Same numbers as [`volume_info`].
+pub fn capacity(home: &Path) -> Option<(u64, u64)> {
+    statfs_bytes(home)
+}
+
 /// Probe: the TCC database, `~/Library/Safari` or `~/.Trash` are readable only with Full Disk
 /// Access.
 pub fn has_full_disk_access(home: &Path) -> bool {
