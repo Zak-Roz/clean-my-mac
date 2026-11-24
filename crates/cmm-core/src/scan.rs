@@ -2,7 +2,8 @@
 //!
 //! [`scan_at`] runs the selected rules in parallel (rayon), turns every failing (or panicking)
 //! detector into a [`ScanError`], adds `requires_quit` blockers, drops findings below
-//! `min_finding_bytes` (`Command` and `InfoOnly` findings are exempt), removes findings covered by an
+//! `min_finding_bytes` — or the rule's own `params.min_bytes` when it sets one (safety fix 4) —
+//! (`Command` and `InfoOnly` findings are exempt), removes findings covered by an
 //! unblocked ancestor finding (ARCHITECTURE.md §10) and sorts by allocated bytes.
 
 use std::collections::{HashMap, HashSet};
@@ -125,7 +126,9 @@ pub(crate) fn scan_with(
             Err(e) => errors.push(ScanError { path: rule.id.clone(), message: e.to_string() }),
         }
     }
-    findings.retain(|f| above_min_size(f, config.min_finding_bytes));
+    let min_bytes: HashMap<&str, u64> = selected.iter().map(|r| (r.id.as_str(), min_bytes_for(r, config))).collect();
+    findings
+        .retain(|f| above_min_size(f, min_bytes.get(f.rule_id.as_str()).copied().unwrap_or(config.min_finding_bytes)));
     let mut findings = drop_covered_findings(findings);
     findings.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.id.cmp(&b.id)));
 
@@ -144,6 +147,12 @@ pub(crate) fn scan_with(
         findings,
         errors,
     }
+}
+
+/// The size threshold for `rule`'s findings: its `params.min_bytes` when set (e.g. 5 MiB for Claude
+/// Code transcripts), otherwise the global `min_finding_bytes`.
+pub fn min_bytes_for(rule: &RuleDef, config: &Config) -> u64 {
+    rule.params.get("min_bytes").and_then(serde_json::Value::as_u64).unwrap_or(config.min_finding_bytes)
 }
 
 /// `min_finding_bytes` filter (contract v2): `Command` and `InfoOnly` findings are kept whatever
@@ -375,6 +384,23 @@ mod tests {
         assert!(rule_events.iter().all(|e| e.phase == ScanPhase::Rules && e.total_rules == 3));
         let last = events.last().unwrap();
         assert_eq!((last.phase, last.done_rules, last.findings), (ScanPhase::Done, 3, 2));
+    }
+
+    #[test]
+    fn rule_level_min_bytes_replaces_the_global_minimum() {
+        let home = tempfile::tempdir().unwrap();
+        write(&home.path().join("small/blob"), MIB);
+        write(&home.path().join("tiny/blob"), 1000);
+        write(&home.path().join("other/blob"), MIB);
+        let mut small = rule("rule.small", &["~/small", "~/tiny"]);
+        small.params = serde_json::json!({ "min_bytes": 512 * 1024 });
+        let rules = vec![small, rule("rule.other", &["~/other"])];
+        let report = scan_at(home.path(), &rules, &ScanOptions::default(), &config(50 * MIB as u64), &|_| {});
+        let paths: Vec<_> = report.findings.iter().map(|f| f.path.clone().unwrap()).collect();
+        let expect = |p: &str| home.path().join(p).to_string_lossy().into_owned();
+        assert_eq!(paths, vec![expect("small")], "1 MiB passes the rule's 512 KiB, not the global 50 MiB");
+        assert_eq!(min_bytes_for(&rules[0], &config(7)), 512 * 1024);
+        assert_eq!(min_bytes_for(&rules[1], &config(7)), 7);
     }
 
     #[test]

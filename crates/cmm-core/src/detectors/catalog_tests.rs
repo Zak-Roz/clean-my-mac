@@ -15,7 +15,7 @@ fn rules() -> Vec<RuleDef> {
 fn known_params(kind: DetectorKind) -> &'static [&'static str] {
     match kind {
         DetectorKind::Paths | DetectorKind::SimulatorRuntimes | DetectorKind::Docker => &[],
-        DetectorKind::OlderThan => &["days", "extensions"],
+        DetectorKind::OlderThan => &["days", "extensions", "min_bytes", "exclude", "group_by_root"],
         DetectorKind::StaleArtifacts => &["names", "days"],
         DetectorKind::VersionedSiblings => &["keep", "depth"],
         DetectorKind::GitWorktrees => &["depth"],
@@ -170,4 +170,67 @@ fn required_coverage() {
     }
     let kinds: HashSet<DetectorKind> = rules.iter().map(|r| r.detector).collect();
     assert_eq!(kinds.len(), 9, "every detector kind is used by at least one rule");
+}
+
+/// Safety fix 4: the transcripts rule proposes old, large session logs one by one, grouped by
+/// project folder, and never the project folder itself or its `memory/`.
+#[test]
+fn claude_code_memory_is_never_proposed() {
+    use crate::config::Config;
+    use crate::detectors::support::testutil::{age, file};
+    use crate::model::ScanOptions;
+
+    const MIB: usize = 1024 * 1024;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().canonicalize().unwrap();
+    let projects = [
+        home.join(".claude/projects/-Users-me-Developer-app"),
+        home.join("Library/Application Support/ai-profiles/profiles/p1/cli-config/projects/-Users-me-x"),
+    ];
+    for project in &projects {
+        // Everything is old and large, including memory/ (and a differently cased copy).
+        file(&project.join("memory/MEMORY.md"), 6 * MIB, 90);
+        file(&project.join("memory/notes.md"), 10, 90);
+        age(&project.join("memory"), 90);
+        file(&project.join("Memory/x.md"), 6 * MIB, 90);
+        age(&project.join("Memory"), 90);
+        file(&project.join("old-session.jsonl"), 6 * MIB, 90);
+        file(&project.join("old-session/subagents/a.jsonl"), 6 * MIB, 90);
+        for d in ["old-session/subagents", "old-session"] {
+            age(&project.join(d), 90);
+        }
+        file(&project.join("small-session.jsonl"), MIB, 90);
+        file(&project.join("new-session.jsonl"), 6 * MIB, 0);
+        age(project, 90);
+    }
+    let rules = rules();
+    let config = Config { min_finding_bytes: 50 * MIB as u64, data_dir: home.join("data"), ..Config::default() };
+    let opts = ScanOptions { rule_ids: Some(vec!["ai.claude-code.transcripts".into()]), categories: None };
+    let report = crate::scan::scan_at(&home, &rules, &opts, &config, &|_| {});
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+    let mut found: Vec<(String, String)> = report
+        .findings
+        .iter()
+        .map(|f| {
+            let path = std::path::Path::new(f.path.as_deref().unwrap());
+            let project = path.parent().unwrap().to_string_lossy().into_owned();
+            assert_eq!(f.group.as_deref(), Some(project.as_str()), "grouped by project folder");
+            (project, path.file_name().unwrap().to_string_lossy().into_owned())
+        })
+        .collect();
+    found.sort();
+    let mut expected: Vec<(String, String)> = projects
+        .iter()
+        .flat_map(|p| {
+            let p = p.to_string_lossy().into_owned();
+            [(p.clone(), "old-session".to_string()), (p, "old-session.jsonl".to_string())]
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(found, expected, "5 MiB rule minimum (not 50 MiB), no memory, no small or recent logs");
+    for f in &report.findings {
+        let path = f.path.as_deref().unwrap().to_lowercase();
+        assert!(!path.contains("/memory"), "memory proposed: {path}");
+    }
 }

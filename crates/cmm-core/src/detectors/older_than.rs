@@ -8,7 +8,10 @@
 //! `kMDItemDateAdded` keeps a just-extracted archive with old mtimes from looking abandoned.
 //!
 //! Params: `days` (default `downloads_older_than_days`), `extensions` (e.g. `["dmg", ".tar.gz"]`,
-//! case-insensitive suffix match), `min_bytes` (default 0). Unknown params are an error.
+//! case-insensitive suffix match), `min_bytes` (default 0; the scan also uses it instead of the
+//! global `min_finding_bytes` for this rule), `exclude` (child names that are never proposed,
+//! case-insensitive, e.g. Claude Code's `memory`), `group_by_root` (default false: set each
+//! finding's `group` to its root, e.g. the project folder). Unknown params are an error.
 //! Symlinks, `.DS_Store` and `.localized` are ignored.
 
 use std::ffi::OsStr;
@@ -42,37 +45,45 @@ struct Params {
     /// Lower-case suffixes without the leading dot.
     extensions: Option<Vec<String>>,
     min_bytes: u64,
+    /// Lower-case child names never proposed.
+    exclude: Vec<String>,
+    group_by_root: bool,
 }
 
 fn params(rule: &RuleDef, config: &Config) -> Result<Params, CoreError> {
     let bad =
         |key: &str, expected: &str| CoreError::Rule(format!("rule `{}`: params.{key} must be {expected}", rule.id));
     let map = rule.params.as_object().ok_or_else(|| bad("", "a table"))?;
-    if let Some(key) = map.keys().find(|k| !["days", "extensions", "min_bytes"].contains(&k.as_str())) {
+    const KNOWN: [&str; 5] = ["days", "extensions", "min_bytes", "exclude", "group_by_root"];
+    if let Some(key) = map.keys().find(|k| !KNOWN.contains(&k.as_str())) {
         return Err(CoreError::Rule(format!("rule `{}`: unknown param `{key}` for older-than", rule.id)));
     }
     let days = match map.get("days") {
         None => config.downloads_older_than_days,
         Some(v) => v.as_u64().and_then(|d| u32::try_from(d).ok()).ok_or_else(|| bad("days", "a whole number"))?,
     };
-    let extensions = match map.get("extensions") {
-        None => None,
-        Some(v) => Some(
-            v.as_array()
-                .and_then(|items| {
-                    items
-                        .iter()
-                        .map(|e| e.as_str().map(|s| s.trim_start_matches('.').to_ascii_lowercase()))
-                        .collect::<Option<Vec<_>>>()
-                })
-                .ok_or_else(|| bad("extensions", "a list of strings"))?,
-        ),
+    let strings = |key: &str| -> Result<Option<Vec<String>>, CoreError> {
+        match map.get(key) {
+            None => Ok(None),
+            Some(v) => v
+                .as_array()
+                .and_then(|items| items.iter().map(|e| e.as_str().map(str::to_string)).collect::<Option<Vec<_>>>())
+                .map(Some)
+                .ok_or_else(|| bad(key, "a list of strings")),
+        }
+    };
+    let extensions = strings("extensions")?
+        .map(|exts| exts.iter().map(|s| s.trim_start_matches('.').to_ascii_lowercase()).collect());
+    let exclude = strings("exclude")?.unwrap_or_default().iter().map(|s| s.to_lowercase()).collect();
+    let group_by_root = match map.get("group_by_root") {
+        None => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad("group_by_root", "true or false"))?,
     };
     let min_bytes = match map.get("min_bytes") {
         None => 0,
         Some(v) => v.as_u64().ok_or_else(|| bad("min_bytes", "a whole number"))?,
     };
-    Ok(Params { days, extensions, min_bytes })
+    Ok(Params { days, extensions, min_bytes, exclude, group_by_root })
 }
 
 fn detect_with(rule: &RuleDef, ctx: &ScanContext, spotlight: &Spotlight) -> Result<Vec<Finding>, CoreError> {
@@ -83,7 +94,7 @@ fn detect_with(rule: &RuleDef, ctx: &ScanContext, spotlight: &Spotlight) -> Resu
         if !root.symlink_metadata().is_ok_and(|m| m.is_dir()) {
             continue;
         }
-        let children = match list_children(&root, params.extensions.as_deref()) {
+        let children = match list_children(&root, params.extensions.as_deref(), &params.exclude) {
             Ok(children) => children,
             Err(e) => {
                 ctx.warn(root.to_string_lossy(), e.to_string());
@@ -113,6 +124,9 @@ fn detect_with(rule: &RuleDef, ctx: &ScanContext, spotlight: &Spotlight) -> Resu
                 };
                 let mut finding = make_finding(rule, &path.to_string_lossy(), Some(path), &size, reason);
                 finding.last_used = last_used;
+                if params.group_by_root {
+                    finding.group = Some(root.to_string_lossy().into_owned());
+                }
                 Some(finding)
             })
             .collect();
@@ -121,8 +135,9 @@ fn detect_with(rule: &RuleDef, ctx: &ScanContext, spotlight: &Spotlight) -> Resu
     Ok(findings)
 }
 
-/// Direct children of `dir` (sorted), minus symlinks and Finder litter, filtered by extension.
-fn list_children(dir: &Path, extensions: Option<&[String]>) -> std::io::Result<Vec<PathBuf>> {
+/// Direct children of `dir` (sorted), minus symlinks, Finder litter and `exclude`d names (lower
+/// case), filtered by extension.
+fn list_children(dir: &Path, extensions: Option<&[String]>, exclude: &[String]) -> std::io::Result<Vec<PathBuf>> {
     let mut children = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -130,7 +145,7 @@ fn list_children(dir: &Path, extensions: Option<&[String]>) -> std::io::Result<V
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_lowercase();
-        if name == ".ds_store" || name == ".localized" {
+        if name == ".ds_store" || name == ".localized" || exclude.contains(&name) {
             continue;
         }
         if let Some(exts) = extensions
@@ -283,6 +298,29 @@ mod tests {
     }
 
     #[test]
+    fn excluded_names_are_never_proposed_and_groups_follow_the_root() {
+        let home = downloads();
+        let names = run(home.path(), &rule(serde_json::json!({ "exclude": ["OLD-DIR", "tiny.txt"] })), &no_spotlight);
+        assert_eq!(names.unwrap(), vec!["old.DMG"], "exclude matches whole names, case-insensitively");
+        let names = run(home.path(), &rule(serde_json::json!({ "exclude": ["old"] })), &no_spotlight);
+        assert_eq!(names.unwrap(), vec!["old-dir", "old.DMG", "tiny.txt"], "not a prefix match");
+
+        let (sizer, processes, config) = (Sizer::new(), ProcessSnapshot::default(), Config::default());
+        let ctx = ScanContext {
+            home: home.path().into(),
+            now: Utc::now(),
+            sizer: &sizer,
+            processes: &processes,
+            config: &config,
+        };
+        let dl = home.path().join("Downloads").to_string_lossy().into_owned();
+        let grouped = detect_with(&rule(serde_json::json!({ "group_by_root": true })), &ctx, &no_spotlight).unwrap();
+        assert!(!grouped.is_empty() && grouped.iter().all(|f| f.group.as_deref() == Some(dl.as_str())));
+        let plain = detect_with(&rule(serde_json::json!({})), &ctx, &no_spotlight).unwrap();
+        assert!(plain.iter().all(|f| f.group.is_none()));
+    }
+
+    #[test]
     fn extension_filter_is_case_insensitive_suffix() {
         let home = downloads();
         let names = run(home.path(), &rule(serde_json::json!({ "extensions": ["dmg", ".txt"] })), &no_spotlight);
@@ -340,6 +378,9 @@ mod tests {
             serde_json::json!({ "days": -1 }),
             serde_json::json!({ "extensions": "dmg" }),
             serde_json::json!({ "min_bytes": 1.5 }),
+            serde_json::json!({ "exclude": "memory" }),
+            serde_json::json!({ "exclude": [1] }),
+            serde_json::json!({ "group_by_root": "yes" }),
             serde_json::json!({ "dayz": 3 }),
         ] {
             let err = run(home.path(), &rule(params.clone()), &no_spotlight).unwrap_err();

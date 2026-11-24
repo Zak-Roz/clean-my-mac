@@ -54,21 +54,26 @@ roots = ["~/Library/Application Support/ai-profiles/migration-backup-*"]
 action = "trash"
 requires_quit = ["Claude"]
 
+# One finding per session log (or session folder) inside each project folder, never the project
+# folder itself: it also holds the user's curated `memory/`, which is excluded by name.
 [[rule]]
 id = "ai.claude-code.transcripts"
 title = "Old Claude Code transcripts"
-description = "Claude Code conversation logs of projects not used for 30 days. Those sessions can no longer be resumed (`claude --resume`); they are not recreated."
+description = "Claude Code conversation logs (5 MB or more) not used for 30 days, grouped by project. Those sessions can no longer be resumed (`claude --resume`); they are not recreated. Project memory (`memory/`) is never touched."
 category = "ai-tools"
 risk = "review"
 detector = "older-than"
 roots = [
-  "~/.claude/projects",
-  "~/Library/Application Support/ai-profiles/profiles/*/cli-config/projects",
+  "~/.claude/projects/*",
+  "~/Library/Application Support/ai-profiles/profiles/*/cli-config/projects/*",
 ]
 action = "trash"
 
 [rule.params]
 days = 30
+exclude = ["memory"]
+group_by_root = true
+min_bytes = 5242880 # 5 MiB, replaces the global minimum for this rule
 
 [[rule]]
 id = "ai.claude-code.debug-logs"
