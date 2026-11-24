@@ -122,6 +122,7 @@ fn finding(rule_id: &str, path: Option<&Path>, bytes: u64, action: ActionKind) -
         bytes,
         logical_bytes: bytes,
         files: 1,
+        is_dir: path.is_some_and(|p| p.symlink_metadata().is_ok_and(|m| m.is_dir())),
         last_used: None,
         reason: "test".into(),
         action,
@@ -970,7 +971,7 @@ fn fresh_file_replaced_by_a_folder_and_back_is_skipped() {
     fs::remove_dir_all(caches.join("a")).unwrap();
     write_file(&caches.join("a"), 1010);
 
-    for (f, why) in [(&c, "1 file → a folder of 2 files"), (&a, "a folder of 2 files → a file")] {
+    for (f, why) in [(&c, "a file → a folder of 2 files"), (&a, "a folder of 2 files → a file")] {
         for mode in [CleanMode::Trash, CleanMode::Delete] {
             let res = fresh_run(&fx, &stored, f, mode);
             assert_eq!(res.items[0].outcome, CleanOutcome::Skipped, "{:?}", res.items);
@@ -981,6 +982,64 @@ fn fresh_file_replaced_by_a_folder_and_back_is_skipped() {
         }
     }
     assert!(caches.join("c.bin/one").is_file() && caches.join("a").is_file());
+}
+
+/// The swaps the old `files == 1` inference could not see: a file replaced by a folder holding
+/// exactly one file of about the same size, and a one-file folder replaced by a file.
+#[test]
+fn fresh_file_swapped_with_a_one_file_folder_is_skipped() {
+    let fx = fixture();
+    let caches = fx.home.join("Library/Caches");
+    write_file(&caches.join("solo/only"), 500);
+    let stored = fx.stored();
+    let (b, c, solo) =
+        (by_label(&stored, "b").clone(), by_label(&stored, "c.bin").clone(), by_label(&stored, "solo").clone());
+    assert_eq!((b.files, b.is_dir), (1, true), "b is a folder of one file");
+    assert_eq!((c.files, c.is_dir), (1, false), "c.bin is a file");
+    assert_eq!((solo.files, solo.is_dir), (1, true));
+    // `c.bin` becomes a folder holding one 100-byte file; `b` and `solo` become 500-byte files.
+    fs::remove_file(caches.join("c.bin")).unwrap();
+    write_file(&caches.join("c.bin/inner"), 100);
+    for name in ["b", "solo"] {
+        fs::remove_dir_all(caches.join(name)).unwrap();
+        write_file(&caches.join(name), 500);
+    }
+
+    let cases = [
+        (&c, "a file → a folder of 1 file"),
+        (&b, "a folder of 1 file → a file"),
+        (&solo, "a folder of 1 file → a file"),
+    ];
+    for (f, why) in cases {
+        let expected = format!("skipped: {NO_LONGER_MATCHES} (changed since the scan: {why}, rescan)");
+        let plan = plan_fresh_with(&fx.env, &fx.config(), &stored, &req(&[f], CleanMode::Trash, true)).unwrap();
+        assert!(plan.items.is_empty(), "{:?}", plan.items);
+        for mode in [CleanMode::Trash, CleanMode::Delete] {
+            let res = fresh_run(&fx, &stored, f, mode);
+            assert_eq!(res.items.len(), 1, "{:?}", res.items);
+            assert_eq!(res.items[0].outcome, CleanOutcome::Skipped, "{:?}", res.items);
+            assert_eq!(msg(&res.items[0]), expected);
+            assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (0, 0));
+        }
+    }
+    assert!(caches.join("c.bin/inner").is_file() && caches.join("b").is_file() && caches.join("solo").is_file());
+    assert!(fs::read_dir(fx.trash()).unwrap().next().is_none(), "nothing went to the Trash");
+}
+
+/// A report saved before `is_dir` existed loads every finding as a file: folder findings fail
+/// closed (skipped until a rescan) instead of being acted on with an unchecked kind.
+#[test]
+fn fresh_report_without_kind_skips_folders() {
+    let fx = fixture();
+    let mut stored = fx.stored();
+    for f in &mut stored.findings {
+        f.is_dir = false;
+    }
+    let a = by_label(&stored, "a").clone();
+    let res = fresh_run(&fx, &stored, &a, CleanMode::Trash);
+    assert_eq!(res.items[0].outcome, CleanOutcome::Skipped, "{:?}", res.items);
+    assert!(msg(&res.items[0]).contains("a file → a folder of 2 files"), "{:?}", res.items);
+    assert!(fx.home.join("Library/Caches/a").exists());
 }
 
 #[test]

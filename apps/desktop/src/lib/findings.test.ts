@@ -29,6 +29,7 @@ function finding(over: Partial<Finding>): Finding {
     bytes: 0,
     logicalBytes: 0,
     files: 0,
+    isDir: false,
     lastUsed: null,
     reason: "",
     action: "trash",

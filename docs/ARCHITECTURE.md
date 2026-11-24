@@ -69,6 +69,7 @@ pub struct Finding {
     pub bytes: u64,                 // ALLOCATED bytes (st_blocks*512), hardlinks counted once
     pub logical_bytes: u64,         // st_size sum (sparse files: Docker.raw is 68.7 GB logical / 11.5 GB real)
     pub files: u64,
+    pub is_dir: bool,               // path was a directory at scan time (symlink_metadata); serde default false
     pub last_used: Option<DateTime<Utc>>, // newest mtime inside (or git last commit for projects)
     pub reason: String,             // deterministic explanation: "Project untouched for 143 days"
     pub action: ActionKind,
@@ -390,5 +391,9 @@ Quality bar for every stream: `cargo fmt --check`, `cargo clippy --workspace --a
 - **Fresh-match also compares size:** a path finding is acted on only if the fresh `bytes` are within
   `max(10 %, 10 MiB)` of what the user saw, and file-vs-folder kind is unchanged; otherwise `Skipped`
   ("changed since the scan: X → Y, rescan"). Command findings are exempt (they are sized from tool output).
-- As shipped (1367a55): the file-vs-folder check is inferred (`files == 1` means "was a file"), because `Finding` has
-  no kind field. Follow-up: add `is_dir: bool` to `Finding` for an exact check.
+- As shipped (1367a55): the file-vs-folder check was inferred (`files == 1` meant "was a file"), because `Finding` had
+  no kind field. **Superseded:** `Finding.is_dir: bool` (set by `make_finding` from `symlink_metadata`, so a symlink is
+  never a folder; `false` for path-less findings) makes the check exact: the stored and the fresh finding must agree on
+  `is_dir`, which also catches a file swapped with a one-file folder. The field is `#[serde(default)]`, so a
+  `last-report.json` saved before it existed still loads; its folder findings read as files and are `Skipped`
+  ("changed since the scan: a file → a folder of N files, rescan") until the next scan — fails closed.

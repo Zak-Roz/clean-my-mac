@@ -45,8 +45,10 @@ pub fn detector_for(kind: DetectorKind) -> &'static dyn Detector {
 }
 
 /// Shared constructor: id `"{rule_id}:{key}"`, risk/category/action copied from the rule,
-/// label = file name of `path` (or `key`), no blockers, `selected_by_default` only for `Risk::Safe`.
-/// Detectors then set `command`, `group`, `label` and add blockers via [`Finding::add_blocker`].
+/// label = file name of `path` (or `key`), no blockers, `selected_by_default` only for `Risk::Safe`,
+/// `is_dir` from `symlink_metadata(path)` (never follows links; `false` without a path or when
+/// unreadable). Detectors then set `command`, `group`, `label` and add blockers via
+/// [`Finding::add_blocker`].
 pub fn make_finding(rule: &RuleDef, key: &str, path: Option<&Path>, size: &SizeInfo, reason: String) -> Finding {
     let label = path
         .and_then(Path::file_name)
@@ -63,6 +65,7 @@ pub fn make_finding(rule: &RuleDef, key: &str, path: Option<&Path>, size: &SizeI
         bytes: size.bytes,
         logical_bytes: size.logical_bytes,
         files: size.files,
+        is_dir: path.and_then(|p| std::fs::symlink_metadata(p).ok()).is_some_and(|m| m.is_dir()),
         last_used: size.newest_mtime,
         reason,
         action: rule.action,
@@ -123,6 +126,23 @@ mod tests {
         assert_eq!(f.id, "ai.claude-desktop.vm-bundles:docker");
         assert_eq!(f.label, "docker");
         assert!(!f.selected_by_default, "review risk is never preselected");
+    }
+
+    #[test]
+    fn make_finding_records_the_kind_without_following_links() {
+        let rules = builtin_rules().unwrap();
+        let npm = rules.iter().find(|r| r.id == "cache.npm").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let (dir, file, link) = (tmp.path().join("dir"), tmp.path().join("file"), tmp.path().join("link"));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(&file, b"x").unwrap();
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        let kind = |path: Option<&Path>| make_finding(npm, "k", path, &SizeInfo::default(), "x".into()).is_dir;
+        assert!(kind(Some(&dir)));
+        assert!(!kind(Some(&file)));
+        assert!(!kind(Some(&link)), "a symlink to a folder is not a folder");
+        assert!(!kind(Some(&tmp.path().join("missing"))));
+        assert!(!kind(None));
     }
 
     #[test]

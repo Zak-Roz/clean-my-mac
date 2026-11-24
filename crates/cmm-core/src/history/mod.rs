@@ -420,6 +420,7 @@ mod tests {
             bytes,
             logical_bytes: bytes,
             files: 1,
+            is_dir: false,
             last_used: None,
             reason: "test".into(),
             action: ActionKind::Trash,

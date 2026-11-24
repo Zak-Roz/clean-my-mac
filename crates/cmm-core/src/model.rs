@@ -121,6 +121,10 @@ pub struct Finding {
     /// st_size sum (sparse files: Docker.raw is 68.7 GB logical / 11.5 GB real).
     pub logical_bytes: u64,
     pub files: u64,
+    /// `path` was a directory when scanned (`symlink_metadata`: a symlink is never a directory).
+    /// `false` for command-only findings and for reports saved before this field existed.
+    #[serde(default)]
+    pub is_dir: bool,
     /// Newest mtime inside (or git last commit for projects).
     pub last_used: Option<DateTime<Utc>>,
     /// Deterministic explanation: "Project untouched for 143 days".
@@ -320,6 +324,7 @@ mod tests {
                 bytes: 10,
                 logical_bytes: 12,
                 files: 1,
+                is_dir: true,
                 last_used: Some(started_at),
                 reason: "Package cache, regenerates".into(),
                 action: ActionKind::GitWorktreeRemove,
@@ -343,9 +348,20 @@ mod tests {
         assert_eq!(finding["category"], "package-caches");
         assert_eq!(finding["action"], "git-worktree-remove");
         assert_eq!(finding["selectedByDefault"], true);
+        assert_eq!(finding["isDir"], true);
 
         let back: ScanReport = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(serde_json::to_value(back).unwrap(), json);
+    }
+
+    /// `last-report.json` files written before `isDir` existed still load (as "not a directory";
+    /// the fresh-match kind check then skips their folder findings until the user rescans).
+    #[test]
+    fn finding_without_is_dir_defaults_to_false() {
+        let mut json = serde_json::to_value(sample_report()).unwrap();
+        json["findings"][0].as_object_mut().unwrap().remove("isDir");
+        let report: ScanReport = serde_json::from_value(json).unwrap();
+        assert!(!report.findings[0].is_dir);
     }
 
     #[test]

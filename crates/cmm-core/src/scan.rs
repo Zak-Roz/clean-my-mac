@@ -267,6 +267,7 @@ mod tests {
             bytes: 1,
             logical_bytes: 1,
             files: 1,
+            is_dir: true,
             last_used: None,
             reason: String::new(),
             action: ActionKind::Trash,

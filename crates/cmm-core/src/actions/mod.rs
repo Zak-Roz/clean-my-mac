@@ -311,31 +311,19 @@ fn size_within_drift(old: u64, new: u64) -> bool {
 }
 
 /// A file that became a folder or a folder that became a file since the scan, as
-/// `(what the user saw, what is there now)`.
-///
-/// A [`Finding`] records no kind, so the stored side is read from `files`: a single file (or link)
-/// counts itself as its one file, a folder counts the non-directory entries inside it. The current
-/// side is read from disk (`symlink_metadata`, never following links). Flagged: a path that is now
-/// a file although the user saw 0 or several files (it was a folder), and a path that is now a
-/// folder of other than one file although the user saw exactly one (a file, or a folder holding
-/// one file that has gained or lost files since: either way not what the user saw). A file
-/// swapped with a folder holding exactly one file (either way) is not caught here; the size check
-/// still applies. An exact check needs the kind in [`Finding`] (a contract change).
+/// `(what the user saw, what is there now)`. Both sides are [`Finding::is_dir`], recorded by the
+/// scan that produced the finding (`symlink_metadata`: a symlink is never a folder), so a file
+/// swapped for a folder holding one file (or back) is caught too. A report saved before `is_dir`
+/// existed loads every finding as a file: its folders are flagged until the user rescans
+/// (fails closed).
 fn kind_change(old: &Finding, new: &Finding) -> Option<(String, String)> {
-    let meta = std::fs::symlink_metadata(new.path.as_deref()?).ok()?;
-    let folder_of = |n: u64| match n {
-        0 => "an empty folder".to_string(),
-        1 => "a folder of 1 file".to_string(),
-        n => format!("a folder of {n} files"),
+    let describe = |f: &Finding| match (f.is_dir, f.files) {
+        (false, _) => "a file".to_string(),
+        (true, 0) => "an empty folder".to_string(),
+        (true, 1) => "a folder of 1 file".to_string(),
+        (true, n) => format!("a folder of {n} files"),
     };
-    if meta.is_dir() {
-        (old.files == 1 && new.files != 1).then(|| ("1 file".to_string(), folder_of(new.files)))
-    } else if old.files != 1 {
-        let now = if meta.file_type().is_symlink() { "a symlink" } else { "a file" };
-        Some((folder_of(old.files), now.to_string()))
-    } else {
-        None
-    }
+    (old.is_dir != new.is_dir).then(|| (describe(old), describe(new)))
 }
 
 fn action_name(action: ActionKind) -> &'static str {

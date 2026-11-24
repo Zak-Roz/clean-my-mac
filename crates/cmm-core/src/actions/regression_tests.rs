@@ -151,6 +151,7 @@ fn wt_finding(repo: &Path, wt: &Path) -> Finding {
         bytes: 1,
         logical_bytes: 1,
         files: 1,
+        is_dir: true,
         last_used: None,
         reason: "scan-time".into(),
         action: ActionKind::GitWorktreeRemove,

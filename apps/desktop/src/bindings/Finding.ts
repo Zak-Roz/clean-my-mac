@@ -25,6 +25,11 @@ bytes: number,
  */
 logicalBytes: number, files: number, 
 /**
+ * `path` was a directory when scanned (`symlink_metadata`: a symlink is never a directory).
+ * `false` for command-only findings and for reports saved before this field existed.
+ */
+isDir: boolean, 
+/**
  * Newest mtime inside (or git last commit for projects).
  */
 lastUsed: string | null, 
