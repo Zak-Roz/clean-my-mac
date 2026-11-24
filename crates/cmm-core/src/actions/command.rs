@@ -3,6 +3,9 @@
 //!
 //! On top of the program allowlist, every argv must match one exact per-detector pattern
 //! (safety fix 6, [`check_argv`]); anything else is refused even when `argv[0]` is allowlisted.
+//! A repository-wide `git worktree prune` is deliberately not a pattern (re-review follow-up after
+//! a28953e): it can drop the admin data of a worktree on an unmounted disk, so no finding, stored
+//! report or hand-edited `last-report.json` can make the executor run it.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -32,8 +35,6 @@ pub(crate) enum Pattern {
     SimctlDeleteUnavailable,
     /// `xcrun simctl runtime delete <UUID>`
     SimctlRuntimeDelete,
-    /// `git -C <abs repo> worktree prune`
-    GitWorktreePrune,
     /// `git -C <abs repo> worktree remove <abs path>`
     GitWorktreeRemove,
 }
@@ -44,7 +45,7 @@ impl Pattern {
         match self {
             Pattern::DockerPrune => DetectorKind::Docker,
             Pattern::SimctlDeleteUnavailable | Pattern::SimctlRuntimeDelete => DetectorKind::SimulatorRuntimes,
-            Pattern::GitWorktreePrune | Pattern::GitWorktreeRemove => DetectorKind::GitWorktrees,
+            Pattern::GitWorktreeRemove => DetectorKind::GitWorktrees,
         }
     }
 
@@ -64,7 +65,6 @@ pub(crate) fn classify(argv: &[String]) -> Option<Pattern> {
         ["docker", "system", "prune", "-f"] => Some(Pattern::DockerPrune),
         ["xcrun", "simctl", "delete", "unavailable"] => Some(Pattern::SimctlDeleteUnavailable),
         ["xcrun", "simctl", "runtime", "delete", id] if is_uuid(id) => Some(Pattern::SimctlRuntimeDelete),
-        ["git", "-C", repo, "worktree", "prune"] if is_plain_absolute(repo) => Some(Pattern::GitWorktreePrune),
         ["git", "-C", repo, "worktree", "remove", path] if is_plain_absolute(repo) && is_plain_absolute(path) => {
             Some(Pattern::GitWorktreeRemove)
         }
@@ -182,7 +182,6 @@ mod tests {
             (&["docker", "system", "prune", "-f"], Command, Docker),
             (&["xcrun", "simctl", "delete", "unavailable"], Command, SimulatorRuntimes),
             (&["xcrun", "simctl", "runtime", "delete", uuid], Command, SimulatorRuntimes),
-            (&["git", "-C", "/Users/x/repo", "worktree", "prune"], Command, GitWorktrees),
             (
                 &["git", "-C", "/Users/x/repo", "worktree", "remove", "/Users/x/repo/wt"],
                 GitWorktreeRemove,
@@ -203,6 +202,8 @@ mod tests {
             &["xcrun", "simctl", "erase", "all"],
             &["xcrun", "simctl", "runtime", "delete", "all"],
             &["xcrun", "simctl", "runtime", "delete", "1234"],
+            // Never executable, however well-formed (re-review follow-up after a28953e).
+            &["git", "-C", "/Users/x/repo", "worktree", "prune"],
             &["git", "-C", "relative/repo", "worktree", "prune"],
             &["git", "-C", "/Users/x/../y", "worktree", "prune"],
             &["git", "-C", "/", "worktree", "prune"],
@@ -218,7 +219,7 @@ mod tests {
             }
         }
         // The action must fit the pattern too.
-        assert!(check_argv(&argv(&["git", "-C", "/r", "worktree", "prune"]), GitWorktreeRemove, None).is_err());
+        assert!(check_argv(&argv(&["docker", "system", "prune", "-f"]), GitWorktreeRemove, None).is_err());
         assert!(check_argv(&argv(&["git", "-C", "/r", "worktree", "remove", "/r/w"]), Command, None).is_err());
         assert!(check_argv(&argv(&["git", "--version"]), Command, None).unwrap_err().contains("allowed pattern"));
         assert!(check_argv(&argv(&["rm"]), Command, None).unwrap_err().contains("not an allowed program"));

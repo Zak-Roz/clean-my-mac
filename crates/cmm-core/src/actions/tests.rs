@@ -33,6 +33,7 @@ fn rule(id: &str, roots: &[&str], action: ActionKind, requires_quit: &[&str]) ->
     let detector = match id {
         "dev.wt" | "dev.wt-cmd" => DetectorKind::GitWorktrees,
         "tool.docker" => DetectorKind::Docker,
+        "tool.simctl" => DetectorKind::SimulatorRuntimes,
         _ => DetectorKind::Paths,
     };
     RuleDef {
@@ -75,6 +76,7 @@ fn fixture() -> Fx {
         rule("dev.wt-cmd", &["~/Developer"], ActionKind::Command, &[]),
         rule("tool.cmd", &[], ActionKind::Command, &[]),
         rule("tool.docker", &[], ActionKind::Command, &[]),
+        rule("tool.simctl", &[], ActionKind::Command, &[]),
         rule("info.only", &["~/Library/Caches/*"], ActionKind::InfoOnly, &[]),
     ];
     let env = ExecuteEnv {
@@ -441,29 +443,33 @@ fn command_allowlist_is_enforced_at_execution() {
     assert!(victim.join("blob").exists());
 }
 
+/// No allowlisted command is harmless enough to run in a test any more (the repository-wide
+/// `git worktree prune` is gone): a dry run covers the `Command` path and its accounting, and the
+/// runner is exercised directly with a read-only `git` call.
 #[test]
-fn allowlisted_command_runs_and_failures_capture_stderr() {
+fn command_findings_free_space_directly_and_failures_capture_stderr() {
     let fx = fixture();
-    let (repo, _) = repo_with_worktree(&fx.home);
-    let repo_s = repo.to_string_lossy().into_owned();
-    let ok = with_command(
-        finding("dev.wt-cmd", None, 300, ActionKind::Command),
-        &["git", "-C", &repo_s, "worktree", "prune"],
+    let simctl = with_command(
+        finding("tool.simctl", None, 300, ActionKind::Command),
+        &["xcrun", "simctl", "delete", "unavailable"],
     );
-    let missing = fx.home.join("Developer/missing-repo").to_string_lossy().into_owned();
-    let mut bad = with_command(
-        finding("dev.wt-cmd", None, 200, ActionKind::Command),
-        &["git", "-C", &missing, "worktree", "prune"],
-    );
-    bad.id = "dev.wt-cmd:bad".into();
-    let rep = report(vec![ok.clone(), bad.clone()]);
-    let history = History::open(&fx.tmp.path().join("data/history.sqlite")).unwrap();
-    let res = run(&fx.env, &rep, &req(&[&ok, &bad], CleanMode::Trash, false), Some(&history));
-    assert_done!(item(&res, &ok), "{:?}", item(&res, &ok));
-    assert_eq!(msg(item(&res, &ok)), format!("ran `git -C {repo_s} worktree prune`"));
-    assert_failed!(item(&res, &bad));
-    assert!(msg(item(&res, &bad)).contains("cannot change to"), "{}", msg(item(&res, &bad)));
+    let rep = report(vec![simctl.clone()]);
+    let res = run(&fx.env, &rep, &req(&[&simctl], CleanMode::Trash, true), None);
+    assert_done!(item(&res, &simctl), "{:?}", item(&res, &simctl));
+    assert_eq!(msg(item(&res, &simctl)), "dry run: would run `xcrun simctl delete unavailable`");
     assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (300, 0), "commands free space directly");
+
+    let (repo, _) = repo_with_worktree(&fx.home);
+    let git = command::resolve_allowed("git").unwrap();
+    let argv = |dir: &Path| -> Vec<String> {
+        ["git", "-C", &dir.to_string_lossy(), "worktree", "list"].map(String::from).to_vec()
+    };
+    let ok = run_checked(&git, &argv(&repo), Duration::from_secs(20)).unwrap();
+    assert!(ok.stdout.contains(".claude/worktrees/wt"), "{}", ok.stdout);
+    let missing = fx.home.join("Developer/missing-repo");
+    let Err(err) = run_checked(&git, &argv(&missing), Duration::from_secs(20)) else { panic!("git in a missing dir") };
+    assert!(err.starts_with(&format!("`git -C {} worktree list` failed (exit ", missing.display())), "{err}");
+    assert!(err.contains("cannot change to"), "{err}");
 }
 
 /// Safety fix 6: an allowlisted program with any other argv, or a pattern from another detector,
@@ -499,10 +505,11 @@ fn commands_must_match_their_exact_per_detector_pattern() {
         assert!(msg(i).contains("does not match an allowed pattern"), "{:?}: {}", f.command, msg(i));
     }
     assert!(victim.join("blob").exists());
-    // The pure plan (no rules at hand) still refuses everything that is no known pattern at all.
+    // The pure plan (no rules at hand) still refuses everything that is no known pattern at all;
+    // a repository-wide `git worktree prune` is no pattern, however well-formed.
     let plan = plan(&rep, &req(&refs, CleanMode::Delete, true)).unwrap();
     let planned: Vec<&Option<Vec<String>>> = plan.items.iter().map(|f| &f.command).collect();
-    assert_eq!(planned.len(), 2, "only the two well-formed patterns pass without rules: {planned:?}");
+    assert_eq!(planned.len(), 1, "only `docker system prune -f` passes without rules: {planned:?}");
 }
 
 // ---------------------------------------------------------------------------------------------

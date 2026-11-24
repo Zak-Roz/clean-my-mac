@@ -1,6 +1,6 @@
 //! Regression tests for the delete-path review (ARCHITECTURE.md §10, "Safety fixes after the
-//! delete-path review"). Every scenario here lost data before the fixes; each test fails on
-//! e30b50b and passes now.
+//! delete-path review") and the re-review after a28953e. Every scenario here lost data before the
+//! fixes; A–D fail on e30b50b, E fails on 8fd1c46, and all pass now.
 //!
 //! Real `git` repositories in a tempdir "home" (global/system git config ignored), the catalog's
 //! own `dev.git-worktrees` and `downloads.redundant-archives` rules, and a fake Trash folder in
@@ -404,4 +404,70 @@ fn d_untracked_files_hidden_by_config_block_worktree_removal() {
     }
     assert_eq!(fs::read_to_string(wt.join("notes.md")).unwrap(), "untracked notes");
     assert!(git(&repo, &["worktree", "list"]).contains("worktrees/wt"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// E: a repository-wide `git worktree prune` (re-review follow-up after a28953e)
+
+/// Scan: one stale entry (its folder deleted by hand) and a worktree on an external disk with a
+/// detached commit and staged work. The disk is ejected after the user picked the stale-entries
+/// finding, so a fresh `git worktree prune` would also drop the external worktree's admin dir: its
+/// index and the only ref to its commit. Nothing may run a prune — not the fresh path, not the
+/// executor, and not a hand-crafted `Command` finding with the old argv (an older
+/// `last-report.json`).
+#[test]
+fn e_no_repo_wide_prune_runs_even_after_another_worktree_disk_is_ejected() {
+    let fx = fixture();
+    let repo = fx.repo();
+    let repo_s = repo.to_string_lossy().into_owned();
+    let gone = repo.join(".claude/worktrees/gone");
+    git(&repo, &["worktree", "add", "-q", "-b", "gone", &gone.to_string_lossy()]);
+    fs::remove_dir_all(&gone).unwrap();
+    let disk = fx.base.join("ExternalDisk");
+    fs::create_dir_all(&disk).unwrap();
+    let wt2 = disk.join("wt2");
+    git(&repo, &["worktree", "add", "-q", "--detach", &wt2.to_string_lossy()]);
+    git(&wt2, &["commit", "-q", "--allow-empty", "-m", "detached work on the external disk"]);
+    let commit = git(&wt2, &["rev-parse", "HEAD"]);
+    fs::write(wt2.join("staged.txt"), "staged on the external disk").unwrap();
+    git(&wt2, &["add", "staged.txt"]);
+
+    let stored = fx.scan();
+    let stale = stored
+        .findings
+        .iter()
+        .find(|f| f.id.ends_with("#prune"))
+        .unwrap_or_else(|| panic!("no stale-entries finding: {:#?}", stored.findings))
+        .clone();
+    let mut crafted = stale.clone();
+    crafted.action = ActionKind::Command;
+    crafted.command = Some(["git", "-C", repo_s.as_str(), "worktree", "prune"].map(String::from).to_vec());
+    let crafted = report_of(vec![crafted]);
+
+    fs::rename(&disk, fx.base.join("ExternalDisk-ejected")).unwrap();
+    for mode in [CleanMode::Trash, CleanMode::Delete] {
+        for report in [&stored, &crafted] {
+            not_done(&fx.fresh(report, &[&stale.id], mode));
+            not_done(&fx.executor(report, &[&stale.id], mode));
+            let req = CleanRequest { finding_ids: vec![stale.id.clone()], mode, dry_run: true };
+            assert!(plan_fresh_with(&fx.env, &fx.config, report, &req).unwrap().items.is_empty());
+            assert!(plan(report, &req).unwrap().items.is_empty());
+        }
+    }
+    fs::rename(fx.base.join("ExternalDisk-ejected"), &disk).unwrap();
+
+    // The external worktree works again once its disk is back, with its staged file and commit.
+    let (ok, status) = git_ok(&wt2, &["status", "--porcelain"]);
+    assert!(ok, "the external worktree still works after re-mounting: {status}");
+    assert_eq!(status, "A  staged.txt");
+    assert_eq!(git(&wt2, &["rev-parse", "HEAD"]), commit);
+    assert!(repo.join(".git/worktrees/wt2/index").is_file());
+    let listed = git(&repo, &["worktree", "list", "--porcelain"]);
+    assert!(listed.contains(&*wt2.to_string_lossy()) && listed.contains(&*gone.to_string_lossy()), "{listed}");
+
+    // The finding only informs: it lists the stale entry and the command to run by hand.
+    assert_eq!(stale.action, ActionKind::InfoOnly, "{stale:?}");
+    assert!(stale.command.is_none() && !stale.selected_by_default && stale.blockers.is_empty(), "{stale:?}");
+    assert!(stale.reason.contains(&*gone.to_string_lossy()), "{}", stale.reason);
+    assert!(stale.reason.contains(&format!("`git -C {repo_s} worktree prune`")), "{}", stale.reason);
 }

@@ -16,8 +16,9 @@
 //!
 //! Git worktrees follow the clean mode: `Trash` moves the worktree folder **and** its own admin
 //! dir (`<repo>/.git/worktrees/<id>`) to the Trash, so restoring both restores the worktree; there
-//! is no repository-wide `git worktree prune`. `Delete` runs the finding's
-//! `git -C <repo> worktree remove <path>` (never `--force`). The branch stays in the repository.
+//! is no repository-wide `git worktree prune` (not even as a finding of its own: stale entries are
+//! information only). `Delete` runs the finding's `git -C <repo> worktree remove <path>` (never
+//! `--force`). The branch stays in the repository.
 
 mod command;
 
@@ -736,7 +737,7 @@ fn act_worktree(
                     admin.display()
                 ),
                 // The folder is already in the Trash: the admin dir stays as a stale entry, which the
-                // next scan offers as a `git worktree prune` finding.
+                // next scan lists (information only; the user prunes it by hand).
                 Err(e) => format!("moved to Trash; its git admin dir {} stayed ({e})", admin.display()),
             };
             Ok(Done { op, message })

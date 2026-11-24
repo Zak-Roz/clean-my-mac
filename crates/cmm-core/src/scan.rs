@@ -156,7 +156,7 @@ pub fn min_bytes_for(rule: &RuleDef, config: &Config) -> u64 {
 }
 
 /// `min_finding_bytes` filter (contract v2): `Command` and `InfoOnly` findings are kept whatever
-/// their size (a zero-byte `git worktree prune`, a blocked simulator runtime).
+/// their size (the zero-byte list of stale worktree entries, a blocked simulator runtime).
 fn above_min_size(f: &Finding, min_bytes: u64) -> bool {
     f.bytes >= min_bytes || matches!(f.action, ActionKind::Command | ActionKind::InfoOnly)
 }

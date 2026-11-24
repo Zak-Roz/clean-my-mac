@@ -10,8 +10,10 @@
 //!   — the same checks the executor repeats right before acting (safety fix 3);
 //! - directories under `<repo>/.claude/worktrees/` that git does not know → `trash` findings
 //!   (blocked when they still hold a `.git` file: the guard refuses any `.git` entry);
-//! - prunable entries (directory gone) → one `command` finding running `git worktree prune`,
-//!   always `review` and never preselected (a "gone" folder may be on an unmounted disk).
+//! - prunable entries (directory gone) → one `info-only` finding that lists them and tells the
+//!   user to run `git -C <repo> worktree prune` themselves if they are really gone. It is never
+//!   executable: a repository-wide prune frees nothing and also drops the admin data (index,
+//!   the only ref to detached commits) of a worktree whose disk is merely unmounted.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -225,25 +227,44 @@ fn repo_findings(rule: &RuleDef, ctx: &ScanContext, repo: &Path) -> Result<Vec<F
     }
 
     if !prunable.is_empty() {
-        let shown: Vec<String> = prunable.iter().take(3).map(|e| path_str(&e.path)).collect();
-        let more = if prunable.len() > shown.len() { ", …" } else { "" };
-        let reason = format!(
-            "{} stale worktree entries whose folders no longer exist ({}{more}); if one is on a disk that \
-             is only unmounted, pruning deletes its git data",
-            prunable.len(),
-            shown.join(", ")
-        );
-        let mut f = make_finding(rule, &format!("{repo_s}#prune"), None, &SizeInfo::default(), reason);
-        f.label = format!("{repo_name}: prune worktree entries");
-        // Safety fix 3: review risk whatever the rule says, never preselected.
-        f.risk = Risk::Review;
-        f.selected_by_default = false;
-        f.action = ActionKind::Command;
-        f.command = Some(vec!["git".into(), "-C".into(), repo_s.clone(), "worktree".into(), "prune".into()]);
-        f.group = group.clone();
-        findings.push(f);
+        findings.push(stale_entries_finding(rule, &repo_s, &repo_name, &prunable));
     }
     Ok(findings)
+}
+
+/// At most this many stale entries are named in the reason.
+const STALE_ENTRIES_SHOWN: usize = 10;
+
+/// The stale worktree entries of one repository (their folders are gone), as an `info-only`
+/// finding: never selectable, never executed (re-review follow-up after a28953e). The reason names
+/// the entries and the command the user can run once they have checked them.
+fn stale_entries_finding(rule: &RuleDef, repo_s: &str, repo_name: &str, prunable: &[&&WorktreeEntry]) -> Finding {
+    let n = prunable.len();
+    let shown: Vec<String> = prunable.iter().take(STALE_ENTRIES_SHOWN).map(|e| path_str(&e.path)).collect();
+    let more = if n > shown.len() { format!(" and {} more", n - shown.len()) } else { String::new() };
+    let (entries, folders, exist, these) = if n == 1 {
+        ("entry", "folder", "exists", "this worktree is")
+    } else {
+        ("entries", "folders", "exist", "these worktrees are")
+    };
+    // Copy-pasteable: quote the repository path unless it is plain.
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+@,:%".contains(c);
+    let repo_arg =
+        if repo_s.chars().all(plain) { repo_s.to_string() } else { format!("'{}'", repo_s.replace('\'', r"'\''")) };
+    let reason = format!(
+        "Git still lists {n} worktree {entries} whose {folders} no longer {exist}: {}{more}. Run `git -C {repo_arg} \
+         worktree prune` yourself if {these} really gone: a worktree on a disk that is only unmounted would \
+         lose its git data (staged changes, detached commits).",
+        shown.join(", ")
+    );
+    let mut f = make_finding(rule, &format!("{repo_s}#prune"), None, &SizeInfo::default(), reason);
+    f.label = format!("{repo_name}: {n} stale worktree {entries}");
+    f.risk = Risk::Review;
+    f.selected_by_default = false;
+    f.action = ActionKind::InfoOnly;
+    f.command = None;
+    f.group = Some(repo_s.to_string());
+    f
 }
 
 impl Detector for GitWorktreesDetector {
@@ -308,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn worktrees_blockers_orphans_and_prune() {
+    fn worktrees_blockers_orphans_and_stale_entries() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().canonicalize().unwrap();
         let repo = home.join("Developer/acme/repo");
@@ -381,14 +402,53 @@ mod tests {
         assert_eq!(orphan.action, ActionKind::Trash);
         assert!(orphan.command.is_none() && orphan.bytes >= 70_000);
 
-        let prune = by_label("repo: prune worktree entries");
-        assert_eq!(prune.action, ActionKind::Command);
-        assert!(prune.path.is_none());
-        assert_eq!(prune.risk, Risk::Review);
-        assert!(!prune.selected_by_default);
-        assert!(prune.reason.contains(&wt("gone").to_string_lossy().into_owned()), "{}", prune.reason);
-        assert_eq!(prune.command.as_ref().unwrap(), &vec!["git", "-C", &repo_s, "worktree", "prune"]);
-        assert_eq!(prune.id, format!("dev.worktrees:{repo_s}#prune"));
+        // Stale entries are information only: listed, with the command to run by hand.
+        let stale = by_label("repo: 1 stale worktree entry");
+        assert_eq!(stale.action, ActionKind::InfoOnly);
+        assert!(stale.path.is_none() && stale.command.is_none() && stale.bytes == 0);
+        assert_eq!(stale.risk, Risk::Review);
+        assert!(!stale.selected_by_default);
+        assert_eq!(
+            stale.reason,
+            format!(
+                "Git still lists 1 worktree entry whose folder no longer exists: {}. Run `git -C {repo_s} worktree \
+                 prune` yourself if this worktree is really gone: a worktree on a disk that is only unmounted \
+                 would lose its git data (staged changes, detached commits).",
+                wt("gone").display()
+            )
+        );
+        assert_eq!(stale.id, format!("dev.worktrees:{repo_s}#prune"));
+        assert_eq!(stale.group.as_deref(), Some(repo_s.as_str()));
+    }
+
+    #[test]
+    fn stale_entries_name_ten_and_quote_the_repository() {
+        let r = rule(
+            "dev.worktrees",
+            DetectorKind::GitWorktrees,
+            ActionKind::GitWorktreeRemove,
+            &["~/Developer"],
+            serde_json::json!({}),
+        );
+        let entries: Vec<WorktreeEntry> = (0..12)
+            .map(|i| WorktreeEntry {
+                path: PathBuf::from(format!("/Volumes/X/wt{i}")),
+                prunable: Some(String::new()),
+                ..Default::default()
+            })
+            .collect();
+        let refs: Vec<&WorktreeEntry> = entries.iter().collect();
+        let f = stale_entries_finding(&r, "/Users/me/it's mine", "it's mine", &refs.iter().collect::<Vec<_>>());
+        assert_eq!(f.label, "it's mine: 12 stale worktree entries");
+        assert_eq!((f.action, f.command.as_ref(), f.selected_by_default), (ActionKind::InfoOnly, None, false));
+        assert!(f.reason.contains("no longer exist: /Volumes/X/wt0, "), "{}", f.reason);
+        assert!(f.reason.contains("/Volumes/X/wt9 and 2 more. "), "{}", f.reason);
+        assert!(!f.reason.contains("wt10"), "{}", f.reason);
+        assert!(
+            f.reason.contains(r"Run `git -C '/Users/me/it'\''s mine' worktree prune` yourself if these worktrees are"),
+            "{}",
+            f.reason
+        );
     }
 
     #[test]

@@ -149,7 +149,7 @@ export function actionDescription(f: Finding, mode: CleanMode): string {
     case "delete":
       return mode === "trash" ? "Move to Trash" : "Delete permanently";
     case "git-worktree-remove":
-      return mode === "trash" ? "Move to Trash, then git worktree prune" : "git worktree remove (permanent)";
+      return mode === "trash" ? "Move to Trash with its git admin data" : "git worktree remove (permanent)";
     case "command":
       return `Runs ${(f.command ?? []).join(" ")}`;
     case "info-only":
@@ -164,7 +164,7 @@ export function doneDescription(f: Finding, mode: CleanMode): string {
     case "delete":
       return mode === "trash" ? "Moved to Trash" : "Deleted";
     case "git-worktree-remove":
-      return mode === "trash" ? "Moved to Trash and pruned from git" : "Removed with git worktree remove";
+      return mode === "trash" ? "Moved to Trash with its git admin data" : "Removed with git worktree remove";
     case "command":
       return `Ran ${(f.command ?? []).join(" ")}`;
     case "info-only":
@@ -189,7 +189,7 @@ export function actionChip(action: ActionKind): string | null {
 
 /**
  * Items whose action frees space immediately whatever the chosen mode: commands run their own tool
- * (docker, xcrun, git worktree prune). Git worktrees follow the mode like plain paths.
+ * (docker, xcrun). Git worktrees follow the mode like plain paths.
  */
 export function isPermanentAction(f: Finding): boolean {
   return f.action === "command";

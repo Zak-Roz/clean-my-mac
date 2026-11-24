@@ -144,17 +144,17 @@ describe("format", () => {
 
 describe("worktree actions follow the clean mode", () => {
   const wt = finding({ path: "/r/.claude/worktrees/w1", action: "git-worktree-remove" });
-  const prune = finding({ label: "prune", action: "command", command: ["git", "-C", "/r", "worktree", "prune"] });
+  const docker = finding({ label: "docker", action: "command", command: ["docker", "system", "prune", "-f"] });
 
   it("describes Trash and Delete differently", () => {
-    expect(actionDescription(wt, "trash")).toBe("Move to Trash, then git worktree prune");
+    expect(actionDescription(wt, "trash")).toBe("Move to Trash with its git admin data");
     expect(actionDescription(wt, "delete")).toBe("git worktree remove (permanent)");
-    expect(doneDescription(wt, "trash")).toBe("Moved to Trash and pruned from git");
+    expect(doneDescription(wt, "trash")).toBe("Moved to Trash with its git admin data");
     expect(doneDescription(wt, "delete")).toBe("Removed with git worktree remove");
   });
 
   it("only commands free space whatever the mode", () => {
     expect(isPermanentAction(wt)).toBe(false);
-    expect(isPermanentAction(prune)).toBe(true);
+    expect(isPermanentAction(docker)).toBe(true);
   });
 });
