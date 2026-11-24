@@ -2,7 +2,8 @@
 //!
 //! Params: `keep` (default `config.keep_versions`), `depth` (default 3: the root's entries and two
 //! levels below). Siblings are grouped by [`naming::name_info`] key (and file vs directory); a group
-//! needs ≥ 2 members, at least one token and letters in the non-token stem. Newest = parsed date when
+//! needs ≥ 2 members, at least one token, and letters in the non-token stem — except pure version
+//! names (`2.1.330`, as in Claude Code's `versions/`), which group on their own. Newest = parsed date when
 //! every member has one, else version when every member has one, else mtime. Members of a group are
 //! never walked into.
 
@@ -65,7 +66,10 @@ fn groups_in(
     let mut findings = Vec::new();
     let mut grouped_dirs = Vec::new();
     for ((is_dir, _), mut members) in groups {
-        let versioned = members.iter().any(|m| m.info.has_token) && members.iter().all(|m| m.info.has_stem_letters);
+        // Letters in the stem keep e.g. screenshots ("2025-04-12 14.05.31.jpg") from grouping;
+        // bare versions ("2.1.330") are the exception.
+        let named = |m: &Member| m.info.has_stem_letters || (m.info.version.is_some() && m.info.date.is_none());
+        let versioned = members.iter().any(|m| m.info.has_token) && members.iter().all(named);
         if members.len() < 2 || !versioned {
             continue;
         }
@@ -211,6 +215,20 @@ mod tests {
 
         let found = detect(home.path(), serde_json::json!({"keep": 1, "depth": 4}));
         assert!(labels(&found).contains(&"x_2026-01-01.txt"));
+    }
+
+    #[test]
+    fn bare_version_names_group() {
+        let home = tempfile::tempdir().unwrap();
+        let versions = home.path().join("Downloads");
+        for (name, days) in [("2.1.9", 1), ("2.1.330", 30), ("2.1.331", 20), ("2.0.99", 2)] {
+            file(&versions.join(name), 100, days);
+        }
+        file(&versions.join("2025-04-12 14.05.31.jpg"), 100, 1);
+        file(&versions.join("2025-04-12 14.11.09.jpg"), 100, 1);
+        let found = detect(home.path(), serde_json::json!({"keep": 2}));
+        assert_eq!(labels(&found), vec!["2.0.99", "2.1.9"]);
+        assert_eq!(found[0].reason, "4 versions; keeping 2.1.331, 2.1.330");
     }
 
     #[test]

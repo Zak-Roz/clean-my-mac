@@ -8,6 +8,8 @@ use crate::scan::ScanContext;
 use crate::size::SizeInfo;
 
 pub mod archives;
+#[cfg(test)]
+mod catalog_tests;
 pub mod docker;
 pub mod external;
 pub mod git_worktrees;
