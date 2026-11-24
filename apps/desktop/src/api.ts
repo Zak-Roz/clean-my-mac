@@ -1,5 +1,5 @@
 // Typed wrappers over the Tauri commands in src-tauri/src/commands.rs (ARCHITECTURE.md §7).
-// With VITE_MOCK=1 every call is served from fixtures/sample-report.json, no Tauri needed.
+// With VITE_MOCK=1 every call is served by ./mock.ts (fixtures/sample-report.json + simulations), no Tauri needed.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -14,6 +14,7 @@ import type { ScanOptions } from "./bindings/ScanOptions";
 import type { ScanProgress } from "./bindings/ScanProgress";
 import type { ScanReport } from "./bindings/ScanReport";
 import type { VolumeInfo } from "./bindings/VolumeInfo";
+import { createMockApi } from "./mock";
 
 export const MOCK = import.meta.env.VITE_MOCK === "1";
 
@@ -50,56 +51,5 @@ const tauriApi: Api = {
   onCleanItem: (handler) => listen<CleanItemResult>(CLEAN_ITEM_EVENT, (e) => handler(e.payload)),
 };
 
-async function loadFixture(): Promise<ScanReport> {
-  // JSON imports widen string unions to `string`; the Rust test `sample_report_fixture_matches_model`
-  // guarantees the fixture matches the ScanReport type exactly.
-  const fixture = await import("../../../fixtures/sample-report.json");
-  return fixture.default as unknown as ScanReport;
-}
-
-let mockLastReport: ScanReport | null = null;
-
-const mockApi: Api = {
-  getVolume: async () => (await loadFixture()).volume,
-  listRules: async () => [],
-  startScan: async (opts) => {
-    const report = await loadFixture();
-    const findings = report.findings.filter(
-      (f) =>
-        (opts.ruleIds === null || opts.ruleIds.includes(f.ruleId)) &&
-        (opts.categories === null || opts.categories.includes(f.category)),
-    );
-    mockLastReport = { ...report, findings };
-    return mockLastReport;
-  },
-  lastReport: async () => mockLastReport,
-  planClean: async (req) => {
-    const report = mockLastReport ?? (await loadFixture());
-    const items = report.findings.filter((f) => req.findingIds.includes(f.id));
-    return {
-      items,
-      totalBytes: items.reduce((sum, f) => sum + f.bytes, 0),
-      warnings: items.flatMap((f) => f.blockers.map((b) => `${f.label}: ${b}`)),
-    };
-  },
-  executeClean: async (req) => {
-    const plan = await mockApi.planClean(req);
-    const items = plan.items.map((f) => ({ findingId: f.id, ok: true, bytes: f.bytes, message: null }));
-    const done = req.dryRun ? 0 : plan.totalBytes;
-    return {
-      dryRun: req.dryRun,
-      mode: req.mode,
-      items,
-      freedBytes: req.mode === "delete" ? done : 0,
-      movedToTrashBytes: req.mode === "trash" ? done : 0,
-    };
-  },
-  historyGrowth: async () => [],
-  historyFreeSpace: async () => [],
-  revealInFinder: async (path) => console.info("[mock] reveal in Finder:", path),
-  openFullDiskAccessSettings: async () => console.info("[mock] open Full Disk Access settings"),
-  onScanProgress: async () => () => {},
-  onCleanItem: async () => () => {},
-};
-
-export const api: Api = MOCK ? mockApi : tauriApi;
+// Constructed only in mock mode, so production builds tree-shake the mock and the fixture away.
+export const api: Api = MOCK ? createMockApi() : tauriApi;
