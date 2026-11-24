@@ -7,7 +7,53 @@ the same disk always gives the same report.
 
 It comes as a desktop app (Tauri) and a CLI, `cmm`, built on the same Rust core.
 
-## Install
+## Install with Homebrew
+
+```bash
+brew tap zak-roz/tap
+```
+
+```bash
+brew trust --cask zak-roz/tap/clean-my-mac
+```
+
+```bash
+brew install --cask zak-roz/tap/clean-my-mac
+```
+
+Homebrew 7 and later load casks from third-party taps only once you trust them; `brew trust`
+above trusts this one cask, not the whole tap. You get:
+
+- `clean-my-mac.app` in `/Applications` (universal: Apple silicon and Intel, macOS 13 or later);
+- `cmm` on your `PATH`: a link to the CLI inside the app, so the two always have the same version.
+
+**First launch.** Releases are signed with the project's own certificate but are **not
+notarized** by Apple, so macOS blocks the first launch. Open **System Settings → Privacy &
+Security** and click **Open Anyway** next to the message about clean-my-mac. If macOS also blocks
+`cmm` the first time you run it, allow it there the same way.
+
+**Full Disk Access.** Grant it to the app as described [below](#full-disk-access). Every release is
+signed with the same certificate, so updates keep the grant.
+
+Update with `brew upgrade --cask clean-my-mac`. To uninstall:
+
+```bash
+brew uninstall --cask clean-my-mac
+```
+
+This quits and removes the app, `cmm` and the daily background scan (if you turned it on), and
+keeps your history and settings. To delete those too (`~/Library/Application Support/clean-my-mac`
+and the app's caches and preferences):
+
+```bash
+brew uninstall --zap --cask clean-my-mac
+```
+
+Without Homebrew: download `clean-my-mac.zip` from the
+[latest release](https://github.com/Zak-Roz/clean-my-mac/releases/latest), unzip it and move the
+app to `/Applications`. `cmm` is in `clean-my-mac.app/Contents/MacOS/`.
+
+## Build from source
 
 Needs Rust 1.97, Node 24, and Xcode command line tools (`corepack` comes with Node).
 
@@ -19,16 +65,17 @@ corepack pnpm install
 scripts/install.sh --build
 ```
 
-This builds the release CLI and app, then installs:
+This builds the app with the CLI inside it (`scripts/build-app.sh`), then installs:
 
 - `clean-my-mac.app` → `/Applications` (ad-hoc signed and not notarized, so it's meant for the
   Mac that built it);
-- `cmm` → `~/.local/bin` (created if missing; you get a warning with the fix if it is not on your `PATH`).
+- a `cmm` link → `~/.local/bin` pointing at the CLI inside the app (the folder is created if
+  missing; you get a warning with the fix if it is not on your `PATH`).
 
 Re-running it upgrades both. It refuses to replace anything that isn't clean-my-mac's own, and
 refuses to replace the app while it's running. `--prefix DIR` installs into `DIR/Applications`
-and `DIR/bin` instead, for a trial run. Without `--build` it installs what's already in
-`target/release`.
+and `DIR/bin` instead, for a trial run. Without `--build` it installs the app already in
+`target/release/bundle/macos`.
 
 To uninstall:
 
@@ -36,9 +83,10 @@ To uninstall:
 scripts/uninstall.sh
 ```
 
-This removes the app and the CLI and nothing else. Your history and settings in
-`~/Library/Application Support/clean-my-mac` are kept unless you pass `--purge`, which lists
-what it will permanently delete and asks you to type `purge` to confirm.
+This removes the app, the `cmm` link and, if it runs that app's `cmm`, the daily background scan;
+nothing else. Your history and settings in `~/Library/Application Support/clean-my-mac` are kept
+unless you pass `--purge`, which lists what it will permanently delete and asks you to type
+`purge` to confirm.
 
 ## Full Disk Access
 
@@ -60,9 +108,10 @@ Everything else works without it.
 
 Two things to know:
 
-- The build is ad-hoc signed, so macOS ties the permission to this exact build. **After every
-  reinstall, remove the old clean-my-mac entry (−) and add the app again**; otherwise the toggle
-  shows as on but doesn't apply.
+- Homebrew releases keep the permission across updates. A build from source is ad-hoc signed, so
+  macOS ties the permission to that exact build: **after every reinstall from source, remove the
+  old clean-my-mac entry (−) and add the app again**; otherwise the toggle shows as on but doesn't
+  apply. The same goes for switching between a release and a build from source.
 - The CLI inherits the permission of the terminal it runs in. For `cmm`, give Full Disk Access
   to Terminal, iTerm, or whichever terminal you use.
 
@@ -111,6 +160,48 @@ or disable rules by id.
   run if that database can't be opened.
 
 Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §6 and §10.
+
+## Releasing
+
+GitHub Actions builds, signs and publishes a release when a `v*` tag is pushed
+([`release.yml`](.github/workflows/release.yml)); [`ci.yml`](.github/workflows/ci.yml) runs the
+checks on every push to `main` and every pull request.
+
+Once, on the repository owner's Mac (needs `gh` with admin rights on this repository and on
+`<owner>/homebrew-tap`; `--dry-run` shows the plan and changes nothing):
+
+```bash
+scripts/setup-release-signing.sh --dry-run
+```
+
+```bash
+scripts/setup-release-signing.sh
+```
+
+It creates the self-signed code signing certificate "clean-my-mac Release", keeps a backup in
+`~/Library/Application Support/clean-my-mac-release-signing` (copy it somewhere safe: a release
+signed with another certificate makes every user grant Full Disk Access again), and sets the
+repository secrets `MACOS_CERT_P12`, `MACOS_CERT_PASSWORD` and `HOMEBREW_TAP_DEPLOY_KEY` (a write
+deploy key on the tap).
+
+Then, for each release:
+
+```bash
+scripts/release.sh 0.2.0
+```
+
+```bash
+git push --atomic origin main v0.2.0
+```
+
+`release.sh` sets the version in `Cargo.toml`, `Cargo.lock`, `tauri.conf.json` and `package.json`,
+commits `release: v0.2.0` and tags `v0.2.0`; it pushes nothing. The workflow checks the tag
+against those files, builds a universal app with `cmm` inside, signs it with the certificate,
+publishes `clean-my-mac.zip` on a GitHub release with generated notes, and updates
+`Casks/clean-my-mac.rb` in the tap (rendered from
+[`packaging/homebrew/clean-my-mac.rb.tmpl`](packaging/homebrew/clean-my-mac.rb.tmpl)). A tag like
+`v0.2.0-beta.1` makes a pre-release, which Homebrew skips. `scripts/build-app.sh --universal`
+builds the same app locally, signed ad hoc.
 
 ## Development
 
