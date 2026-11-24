@@ -30,3 +30,10 @@ walkdir = "2.5"
 
 tauri = { version = "2.12", features = [] }
 tauri-build = { version = "2.7", features = [] }
+
+# Host-only units (proc-macros, build scripts) are never stripped. `tauri build` exports
+# MACOSX_DEPLOYMENT_TARGET (from `minimumSystemVersion`), and with it set this toolchain's `strip`
+# writes proc-macro dylibs that dyld refuses to load ("mis-aligned LINKEDIT string pool"), so the
+# release build fails with "can't find crate for `serde_derive`". Shipped binaries are unaffected.
+[profile.release.build-override]
+strip = false
