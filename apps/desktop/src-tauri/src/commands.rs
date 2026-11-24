@@ -16,8 +16,6 @@
 //! clean is refused when the history database (audit log) cannot be opened (safety fix 5).
 //!
 //! Everything that touches the disk or SQLite runs on a blocking thread so the webview never stalls.
-//! Core functions that are still skeleton stubs surface as `"not implemented: …"` errors, which the
-//! UI shows as "not available in this build yet" instead of failing.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -498,14 +496,12 @@ mod tests {
     }
 
     #[test]
-    fn history_reports_unavailable_instead_of_panicking() {
+    fn history_is_created_on_first_use() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config { data_dir: dir.path().join("data"), ..Config::default() };
         let state = AppState::new(config);
-        // Works whether S3's History is implemented (Ok) or still a stub (readable Err).
-        match state.with_history(|h| h.free_space(7)) {
-            Ok(points) => assert!(points.is_empty()),
-            Err(e) => assert!(e.contains("history"), "{e}"),
-        }
+        let points = state.with_history(|h| h.free_space(7)).unwrap();
+        assert!(points.is_empty());
+        assert!(dir.path().join("data/history.sqlite").exists());
     }
 }

@@ -14,7 +14,7 @@ use chrono::Local;
 use cmm_core::config::home_dir;
 use cmm_core::history::History;
 use cmm_core::model::{Category, Risk, ScanOptions, ScanReport};
-use cmm_core::{Config, CoreError, monitor};
+use cmm_core::{Config, monitor};
 
 use super::{display_path, fmt_bytes, fmt_gb, kebab, load_rules, nested_flags, parse_category};
 
@@ -84,7 +84,6 @@ fn record(config: &Config, report: &ScanReport) -> Option<History> {
     let result = History::open(&config.data_dir.join("history.sqlite")).and_then(|h| h.record_scan(report).map(|()| h));
     match result {
         Ok(history) => Some(history),
-        Err(CoreError::Unimplemented(_)) => None,
         Err(e) => {
             eprintln!("warning: scan not recorded in history: {e}");
             None

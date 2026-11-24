@@ -3,7 +3,7 @@
 
 import type { ReactNode } from "react";
 import { MOCK } from "../api";
-import { formatBytes, formatDuration, isNotImplemented, relativeTime, stubDetail } from "../lib/format";
+import { formatBytes, formatDuration, relativeTime } from "../lib/format";
 import { type Screen, useApp } from "../state";
 import { ClockIcon, GaugeIcon, ListIcon, SlidersIcon } from "./icons";
 import { Button, Callout, cx, ProgressBar, Spinner } from "./ui";
@@ -161,9 +161,7 @@ function ScanStatus() {
     return (
       <div className="shrink-0 px-5 pt-3">
         <Callout tone="critical" title="The scan failed">
-          {isNotImplemented(scanError)
-            ? `This part of the engine isn't built yet (${stubDetail(scanError)}).`
-            : scanError}
+          {scanError}
         </Callout>
       </div>
     );

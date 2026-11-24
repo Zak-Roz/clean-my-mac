@@ -16,7 +16,7 @@ import { ShowTrashButton } from "../components/trash";
 import { Button, Callout, cx, RiskBadge, Spinner } from "../components/ui";
 import { isStale, isUnaudited, itemMessage, outcomeCounts, staleWarnings } from "../lib/clean";
 import { actionDescription, doneDescription, isPermanentAction, isSelectable } from "../lib/findings";
-import { errorMessage, formatBytes, formatCount, isNotImplemented, stubDetail, tildify } from "../lib/format";
+import { errorMessage, formatBytes, formatCount, tildify } from "../lib/format";
 import { useApp } from "../state";
 
 type Phase =
@@ -114,9 +114,7 @@ function ConfirmContent({ onClose }: { onClose: () => void }) {
         )}
         {phase.kind === "plan-error" && (
           <Callout tone="critical" title="Can't prepare this clean">
-            {isNotImplemented(phase.message)
-              ? `Cleaning isn't available in this build yet (${stubDetail(phase.message)}). Nothing was changed.`
-              : phase.message}
+            {phase.message}
           </Callout>
         )}
         {phase.kind === "done" && <ResultSummary result={phase.result} plan={phase.plan} />}

@@ -6,7 +6,7 @@ import type { GrowthItem } from "../bindings/GrowthItem";
 import { DeltaBar, FreeSpaceChart } from "../components/charts";
 import { ScreenFrame } from "../components/layout";
 import { Button, Callout, Card, CardHeader, cx, Segmented } from "../components/ui";
-import { formatBytes, formatDate, formatDateTime, formatDelta, isNotImplemented, stubDetail } from "../lib/format";
+import { formatBytes, formatDate, formatDateTime, formatDelta } from "../lib/format";
 import { growthSubtitle, splitGrowth } from "../lib/growth";
 import { useApp, useAsync } from "../state";
 
@@ -42,8 +42,8 @@ export function History() {
         )}
       >
         {error ? (
-          <Callout tone={isNotImplemented(error) ? "info" : "critical"} title="History isn't available">
-            {isNotImplemented(error) ? `Not built into this version of the engine yet (${stubDetail(error)}).` : error}
+          <Callout tone="critical" title="History isn't available">
+            {error}
           </Callout>
         ) : (
           <>

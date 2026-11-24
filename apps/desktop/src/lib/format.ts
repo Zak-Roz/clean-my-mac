@@ -88,14 +88,3 @@ export function errorMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
 }
-
-/** Core stubs answer "not implemented: actions::plan" until their stream lands. */
-export function isNotImplemented(message: string): boolean {
-  return message.includes("not implemented");
-}
-
-/** "history unavailable: not implemented: History::open" -> "not implemented: History::open". */
-export function stubDetail(message: string): string {
-  const at = message.indexOf("not implemented");
-  return at >= 0 ? message.slice(at) : message;
-}

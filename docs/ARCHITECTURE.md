@@ -128,8 +128,7 @@ pub struct Config {
 // Config::load() reads data_dir/config.toml, falling back to defaults.
 ```
 
-`error.rs`: `pub enum CoreError` (thiserror) with `Io`, `Rule`, `Guard`, `Command`, `History`, `NotFound`,
-`Unimplemented(&'static str)` (skeleton stubs only — must be gone before release).
+`error.rs`: `pub enum CoreError` (thiserror) with `Io`, `Rule`, `Guard`, `Command`, `History`, `NotFound`.
 
 ## 3. Core API (signatures are the contract)
 
@@ -316,7 +315,7 @@ conflict waiting to happen — report the need instead.
 - External tools (`git`, `xcrun`, `docker`, `mdls`) run through a timeout (≤ 20 s); a missing or failing tool yields
   no findings plus a `ScanError`, never a panic.
 - CLI layout: one file per subcommand in `crates/cmm-cli/src/cmd/<name>.rs`; `main.rs` only parses and dispatches.
-  `cmm scan` records the report to history unless `--no-record` (ignore `CoreError::Unimplemented` until S3 lands).
+  `cmm scan` records the report to history unless `--no-record`.
 - S2 may add one-line `mod` declarations to `detectors/mod.rs` for its own helper files; everything else in that file is S1's.
 - Run pnpm as `corepack pnpm …` (global pnpm shim is broken on this machine); `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` for non-interactive runs.
 

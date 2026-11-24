@@ -19,7 +19,4 @@ pub enum CoreError {
     History(String),
     #[error("not found: {0}")]
     NotFound(String),
-    /// Skeleton stubs only — must be gone before release.
-    #[error("not implemented: {0}")]
-    Unimplemented(&'static str),
 }

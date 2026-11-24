@@ -8,7 +8,7 @@ import { lastScanLine, ScanButton, ScreenFrame } from "../components/layout";
 import { ShowTrashButton } from "../components/trash";
 import { Button, Callout, Card, CardHeader, cx, StatusPill, Tip } from "../components/ui";
 import { dedupedTotal, isSelectable } from "../lib/findings";
-import { errorMessage, formatBytes, formatDelta, isNotImplemented, stubDetail } from "../lib/format";
+import { errorMessage, formatBytes, formatDelta } from "../lib/format";
 import { growthSubtitle, splitGrowth } from "../lib/growth";
 import { useApp, useAsync } from "../state";
 
@@ -261,13 +261,7 @@ function ReadyTile() {
 }
 
 function HistoryUnavailable({ message }: { message: string }) {
-  return (
-    <p className="py-6 text-center text-[12.5px] text-fg-2">
-      {isNotImplemented(message)
-        ? `History isn't available in this build yet (${stubDetail(message)}).`
-        : `History unavailable: ${message}`}
-    </p>
-  );
+  return <p className="py-6 text-center text-[12.5px] text-fg-2">History unavailable: {message}</p>;
 }
 
 function TopGrowth({ items, error }: { items: GrowthItem[] | null; error: string | null }) {
