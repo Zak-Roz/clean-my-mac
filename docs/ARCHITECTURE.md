@@ -382,3 +382,12 @@ Quality bar for every stream: `cargo fmt --check`, `cargo clippy --workspace --a
 - Known residual risks (documented, not fixed): files hidden via `assume-unchanged`/`skip-worktree` are invisible to
   `git status`; running the standalone `git worktree prune` finding drops admin data of a worktree whose disk is only
   unmounted (its reason text says so); `cmm clean` scans twice.
+
+### Re-review follow-ups (after a28953e)
+
+- **The standalone `git worktree prune` finding becomes `info-only`.** It frees ~0 bytes and a repo-wide prune can
+  destroy admin data of worktrees on unmounted disks or folders deleted by hand. The finding lists the stale entries and
+  tells the user the command to run themselves; `git … worktree prune` is removed from the executable argv patterns.
+- **Fresh-match also compares size:** a path finding is acted on only if the fresh `bytes` are within
+  `max(10 %, 10 MiB)` of what the user saw, and file-vs-folder kind is unchanged; otherwise `Skipped`
+  ("changed since the scan: X → Y, rescan"). Command findings are exempt (they are sized from tool output).
