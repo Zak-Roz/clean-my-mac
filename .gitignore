@@ -15,3 +15,7 @@ apps/desktop/src-tauri/gen/schemas
 
 # Local env
 .env*.local
+
+# Local agent instructions and worktrees
+CLAUDE.md
+.claude/
