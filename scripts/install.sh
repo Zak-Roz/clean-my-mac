@@ -1,13 +1,14 @@
 #!/bin/bash
-# Installs clean-my-mac: the app bundle into /Applications and the `cmm` CLI into ~/.local/bin.
+# Installs clean-my-mac from source: the app bundle into /Applications and a `cmm` link into
+# ~/.local/bin. The CLI ships inside the app (Contents/MacOS/cmm); the link points there.
 #
 #   scripts/install.sh [--build] [--prefix DIR] [--app-dir DIR] [--bin-dir DIR]
 #
-#   --build         build first: release `cmm` and `tauri build` (otherwise the existing
-#                   target/release artifacts are installed)
+#   --build         build first, for this Mac (scripts/build-app.sh); otherwise the app already in
+#                   target/release/bundle/macos is installed
 #   --prefix DIR    install into DIR/Applications and DIR/bin instead (a trial run)
 #   --app-dir DIR   where the .app goes (default /Applications)
-#   --bin-dir DIR   where `cmm` goes (default ~/.local/bin, created if missing)
+#   --bin-dir DIR   where the `cmm` link goes (default ~/.local/bin, created if missing)
 #
 # An existing install is replaced only if it is clean-my-mac's own (bundle id / CLI marker) and
 # the app is not running. Nothing in the data dir (~/Library/Application Support/clean-my-mac) is
@@ -21,7 +22,6 @@ CLI_MARKER="Rule-based macOS disk cleaner" # clap `about` of cmm, embedded in th
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
 SRC_APP="$TARGET_DIR/release/bundle/macos/$APP_NAME"
-SRC_CLI="$TARGET_DIR/release/cmm"
 
 APP_DIR="/Applications"
 BIN_DIR="$HOME/.local/bin"
@@ -30,7 +30,7 @@ BUILD=0
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'install: warning: %s\n' "$*" >&2; }
 say() { printf '%s\n' "$*"; }
-usage() { sed -n '2,10s/^# \{0,1\}//p' "$0"; }
+usage() { sed -n '2,11s/^# \{0,1\}//p' "$0"; }
 
 need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a directory"; }
 while [ "$#" -gt 0 ]; do
@@ -48,20 +48,24 @@ BIN_DIR="${BIN_DIR%/}"
 
 bundle_id_of() { /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null || true; }
 is_our_cli() { LC_ALL=C grep -qa "$CLI_MARKER" "$1" 2>/dev/null; }
+# A link into some clean-my-mac.app (what this script and the Homebrew cask create), even dangling.
+is_our_link() { [ -L "$1" ] && case "$(readlink "$1")" in */"$APP_NAME"/Contents/MacOS/cmm) true ;; *) false ;; esac; }
 app_running_from() { pgrep -f "^$1/Contents/MacOS/" >/dev/null 2>&1; }
 
 if [ "$BUILD" = 1 ]; then
-  say "Building the release CLI and app (this takes a few minutes)…"
-  (cd "$REPO" && cargo build --release -p cmm-cli)
-  (cd "$REPO" && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm --filter desktop tauri build)
+  say "Building the app and the CLI (this takes a few minutes)…"
+  SRC_APP="$("$REPO/scripts/build-app.sh")"
 fi
 
 [ -d "$SRC_APP" ] || die "no app bundle at $SRC_APP — build it first (scripts/install.sh --build)"
-[ -x "$SRC_CLI" ] || die "no CLI at $SRC_CLI — build it first (scripts/install.sh --build)"
 [ "$(bundle_id_of "$SRC_APP")" = "$BUNDLE_ID" ] || die "$SRC_APP is not clean-my-mac ($BUNDLE_ID)"
+SRC_CLI="$SRC_APP/Contents/MacOS/cmm"
+[ -x "$SRC_CLI" ] || die "$SRC_APP has no bundled cmm (a plain \`tauri build\`?) — rebuild with scripts/install.sh --build"
 is_our_cli "$SRC_CLI" || die "$SRC_CLI is not clean-my-mac's cmm"
 
 # --- check both destinations before changing anything ----------------------------------------------
+mkdir -p "$APP_DIR" || die "cannot create $APP_DIR"
+APP_DIR="$(cd "$APP_DIR" && pwd)" # absolute: the cmm link points into it
 DEST_APP="$APP_DIR/$APP_NAME"
 DEST_CLI="$BIN_DIR/cmm"
 if [ -e "$DEST_APP" ] || [ -L "$DEST_APP" ]; then
@@ -73,9 +77,10 @@ if [ -e "$DEST_APP" ] || [ -L "$DEST_APP" ]; then
   app_running_from "$DEST_APP" && die "clean-my-mac is running from $DEST_APP — quit it first"
 fi
 if [ -e "$DEST_CLI" ] || [ -L "$DEST_CLI" ]; then
-  is_our_cli "$DEST_CLI" || die "$DEST_CLI exists and is not clean-my-mac's cmm; not replacing it"
+  if ! is_our_link "$DEST_CLI" && ! { [ -f "$DEST_CLI" ] && is_our_cli "$DEST_CLI"; }; then
+    die "$DEST_CLI exists and is not clean-my-mac's cmm; not replacing it"
+  fi
 fi
-mkdir -p "$APP_DIR" || die "cannot create $APP_DIR"
 [ -w "$APP_DIR" ] || die "$APP_DIR is not writable by $(id -un)"
 mkdir -p "$BIN_DIR" || die "cannot create $BIN_DIR"
 [ -w "$BIN_DIR" ] || die "$BIN_DIR is not writable by $(id -un)"
@@ -93,11 +98,11 @@ trap - EXIT
 say "Installed $DEST_APP"
 
 # --- CLI -----------------------------------------------------------------------------------------
-# New file + rename (not an in-place overwrite): macOS caches code signatures per inode, and
-# overwriting a running or recently run signed binary in place gets it killed at launch.
-install -m 0755 "$SRC_CLI" "$DEST_CLI.tmp.$$"
-mv -f "$DEST_CLI.tmp.$$" "$DEST_CLI"
-say "Installed $DEST_CLI ($("$DEST_CLI" --version))"
+# A link to the cmm inside the app, like the Homebrew cask's `binary`: one signed copy, updated
+# with the app. New link + rename, so an older install's binary is replaced in one step.
+ln -s "$DEST_APP/Contents/MacOS/cmm" "$DEST_CLI.tmp.$$"
+mv -fh "$DEST_CLI.tmp.$$" "$DEST_CLI"
+say "Installed $DEST_CLI -> $DEST_APP/Contents/MacOS/cmm ($("$DEST_CLI" --version))"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -110,5 +115,6 @@ cat <<EOF
 Next: give clean-my-mac Full Disk Access (System Settings → Privacy & Security → Full Disk Access
 → + → $DEST_APP). Without it the Trash size is unknown and protected caches are skipped.
 This build is ad-hoc signed: after every reinstall, remove the old entry (−) and add the app again.
+(Homebrew releases are signed with a stable certificate and keep the grant across updates.)
 For \`cmm\` in a terminal, give Full Disk Access to your terminal app instead.
 EOF

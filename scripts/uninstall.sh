@@ -1,5 +1,6 @@
 #!/bin/bash
-# Uninstalls clean-my-mac: removes the app bundle and the `cmm` CLI, nothing else.
+# Uninstalls clean-my-mac: removes the app bundle, the `cmm` CLI (or link) and, when it runs that
+# app's or link's cmm, the daily background scan (LaunchAgent); nothing else.
 #
 #   scripts/uninstall.sh [--prefix DIR] [--app-dir DIR] [--bin-dir DIR] [--purge]
 #
@@ -23,7 +24,7 @@ PURGE=0
 
 die() { printf 'uninstall: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
-usage() { sed -n '2,11s/^# \{0,1\}//p' "$0"; }
+usage() { sed -n '2,12s/^# \{0,1\}//p' "$0"; }
 
 need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a directory"; }
 while [ "$#" -gt 0 ]; do
@@ -42,7 +43,10 @@ BIN_DIR="${BIN_DIR%/}"
 
 bundle_id_of() { /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null || true; }
 is_our_cli() { LC_ALL=C grep -qa "$CLI_MARKER" "$1" 2>/dev/null; }
+# A link into some clean-my-mac.app (what install.sh and the Homebrew cask create), even dangling.
+is_our_link() { [ -L "$1" ] && case "$(readlink "$1")" in */"$APP_NAME"/Contents/MacOS/cmm) true ;; *) false ;; esac; }
 
+if [ -d "$APP_DIR" ]; then APP_DIR="$(cd "$APP_DIR" && pwd)"; fi # absolute, like install.sh's links
 DEST_APP="$APP_DIR/$APP_NAME"
 DEST_CLI="$BIN_DIR/cmm"
 
@@ -60,8 +64,22 @@ fi
 
 REMOVE_CLI=0
 if [ -e "$DEST_CLI" ] || [ -L "$DEST_CLI" ]; then
-  is_our_cli "$DEST_CLI" || die "$DEST_CLI is not clean-my-mac's cmm; not removing it"
+  if ! is_our_link "$DEST_CLI" && ! { [ -f "$DEST_CLI" ] && is_our_cli "$DEST_CLI"; }; then
+    die "$DEST_CLI is not clean-my-mac's cmm; not removing it"
+  fi
   REMOVE_CLI=1
+fi
+
+# The daily background scan runs one particular cmm; it goes when that cmm goes.
+AGENT_LABEL="$BUNDLE_ID.scan"
+AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
+REMOVE_AGENT=0
+if [ -f "$AGENT_PLIST" ]; then
+  agent_cmm="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$AGENT_PLIST" 2>/dev/null || true)"
+  case "$agent_cmm" in
+    "$DEST_APP"/*) REMOVE_AGENT="$REMOVE_APP" ;;
+    "$DEST_CLI") REMOVE_AGENT="$REMOVE_CLI" ;;
+  esac
 fi
 
 PURGE_PATHS=()
@@ -107,6 +125,11 @@ if [ "${#PURGE_PATHS[@]}" -gt 0 ]; then
 fi
 
 # --- remove --------------------------------------------------------------------------------------
+if [ "$REMOVE_AGENT" = 1 ]; then
+  launchctl bootout "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1 || true
+  rm -f "$AGENT_PLIST"
+  say "Removed the daily background scan ($AGENT_PLIST)"
+fi
 if [ "$REMOVE_APP" = 1 ]; then
   rm -rf "$DEST_APP"
   say "Removed $DEST_APP"
