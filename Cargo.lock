@@ -460,6 +460,7 @@ dependencies = [
  "glob",
  "libc",
  "rayon",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

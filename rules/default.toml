@@ -1,5 +1,13 @@
 # Built-in rule catalog, embedded into cmm-core with include_str!.
-# Format: docs/ARCHITECTURE.md §4. The full catalog is filled in by work stream S2.
+# Format and detector semantics: docs/ARCHITECTURE.md §4. Keys are snake_case.
+#
+# risk:   safe   = regenerates by itself, preselected
+#         review = probably unneeded, the user ticks it
+#         manual = shown, never preselected (dumps, documents, media, models)
+# Every description says what is lost and whether it comes back.
+# Globs: `*` matches within one path segment; braces are not supported.
+
+# ─── AI tools ────────────────────────────────────────────────────────────────
 
 [[rule]]
 id = "ai.claude-desktop.vm-bundles"
@@ -17,6 +25,203 @@ requires_quit = ["Claude"]
 regenerates = true
 
 [[rule]]
+id = "ai.claude-desktop.caches"
+title = "Claude Desktop web caches"
+description = "Chromium HTTP, code and GPU caches of Claude Desktop (and each ai-profiles profile). Rebuilt automatically; the first launch is a little slower."
+category = "ai-tools"
+risk = "safe"
+detector = "paths"
+roots = [
+  "~/Library/Application Support/Claude/Cache",
+  "~/Library/Application Support/Claude/Code Cache",
+  "~/Library/Application Support/Claude/GPUCache",
+  "~/Library/Application Support/ai-profiles/profiles/*/gui-data/Cache",
+  "~/Library/Application Support/ai-profiles/profiles/*/gui-data/Code Cache",
+  "~/Library/Application Support/ai-profiles/profiles/*/gui-data/GPUCache",
+]
+action = "trash"
+requires_quit = ["Claude"]
+regenerates = true
+
+[[rule]]
+id = "ai.ai-profiles.migration-backups"
+title = "ai-profiles migration backup"
+description = "Copy of your Claude profiles made when ai-profiles migrated them. Not needed once the profiles work; it is not recreated."
+category = "ai-tools"
+risk = "review"
+detector = "paths"
+roots = ["~/Library/Application Support/ai-profiles/migration-backup-*"]
+action = "trash"
+requires_quit = ["Claude"]
+
+[[rule]]
+id = "ai.claude-code.transcripts"
+title = "Old Claude Code transcripts"
+description = "Claude Code conversation logs of projects not used for 30 days. Those sessions can no longer be resumed (`claude --resume`); they are not recreated."
+category = "ai-tools"
+risk = "review"
+detector = "older-than"
+roots = [
+  "~/.claude/projects",
+  "~/Library/Application Support/ai-profiles/profiles/*/cli-config/projects",
+]
+action = "trash"
+
+[rule.params]
+days = 30
+
+[[rule]]
+id = "ai.claude-code.debug-logs"
+title = "Claude Code debug logs"
+description = "Debug logs written by Claude Code. Only useful for bug reports; new logs are written as needed."
+category = "ai-tools"
+risk = "safe"
+detector = "paths"
+roots = [
+  "~/.claude/debug",
+  "~/Library/Application Support/ai-profiles/profiles/*/cli-config/debug",
+]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "ai.claude-code.old-versions"
+title = "Old Claude Code versions"
+description = "Previous Claude Code builds kept by the native installer. The two newest are kept; older ones are not needed to run Claude Code and are not recreated."
+category = "ai-tools"
+risk = "review"
+detector = "versioned-siblings"
+roots = ["~/.local/share/claude/versions"]
+action = "trash"
+
+[rule.params]
+keep = 2
+depth = 1
+
+[[rule]]
+id = "ai.claude-desktop.claude-code-versions"
+title = "Old Claude Code versions (Claude Desktop)"
+description = "Claude Code builds downloaded by Claude Desktop (host and VM builds, per profile). The two newest are kept; Claude Desktop downloads a version again if it needs it."
+category = "ai-tools"
+risk = "review"
+detector = "versioned-siblings"
+roots = [
+  "~/Library/Application Support/Claude/claude-code",
+  "~/Library/Application Support/Claude/claude-code-vm",
+  "~/Library/Application Support/ai-profiles/profiles/*/gui-data/claude-code",
+  "~/Library/Application Support/ai-profiles/profiles/*/gui-data/claude-code-vm",
+]
+action = "trash"
+requires_quit = ["Claude"]
+regenerates = true
+
+[rule.params]
+keep = 2
+depth = 1
+
+[[rule]]
+id = "ai.codex.sessions"
+title = "Old Codex sessions"
+description = "Codex CLI conversation logs (per month) older than 30 days. Those sessions can no longer be resumed; they are not recreated."
+category = "ai-tools"
+risk = "review"
+detector = "older-than"
+roots = ["~/.codex/sessions/*"]
+action = "trash"
+
+[rule.params]
+days = 30
+
+[[rule]]
+id = "ai.codex.logs-db"
+title = "Codex log database"
+description = "Codex's internal log database (logs_*.sqlite and its -wal/-shm files). Diagnostic only; Codex starts a new one."
+category = "ai-tools"
+risk = "safe"
+detector = "paths"
+roots = ["~/.codex/logs_*.sqlite*"]
+action = "trash"
+requires_quit = ["codex", "Codex"]
+regenerates = true
+
+[[rule]]
+id = "ai.codex.runtimes"
+title = "Codex runtimes cache"
+description = "Tool runtimes Codex downloads for running commands. Downloaded again the next time Codex needs them."
+category = "ai-tools"
+risk = "safe"
+detector = "paths"
+roots = ["~/.cache/codex-runtimes"]
+action = "trash"
+requires_quit = ["codex", "Codex"]
+regenerates = true
+
+[[rule]]
+id = "ai.codex.old-versions"
+title = "Old Codex versions"
+description = "Previous Codex CLI releases from the standalone installer. The two newest are kept (`current` points at the newest); older ones are not recreated."
+category = "ai-tools"
+risk = "review"
+detector = "versioned-siblings"
+roots = ["~/.codex/packages/standalone/releases"]
+action = "trash"
+requires_quit = ["codex", "Codex"]
+
+[rule.params]
+keep = 2
+depth = 1
+
+[[rule]]
+id = "ai.gemini.tmp"
+title = "Old Gemini CLI temp data"
+description = "Per-project chat checkpoints and temp files of Gemini CLI not used for 30 days. Those checkpoints are lost; new ones are written as you work."
+category = "ai-tools"
+risk = "review"
+detector = "older-than"
+roots = ["~/.gemini/tmp"]
+action = "trash"
+
+[rule.params]
+days = 30
+
+[[rule]]
+id = "ai.cursor.caches"
+title = "Cursor caches"
+description = "Chromium caches, cached VS Code data and downloaded extension packages of Cursor. Rebuilt automatically; settings and extensions stay."
+category = "ai-tools"
+risk = "safe"
+detector = "paths"
+roots = [
+  "~/Library/Application Support/Cursor/Cache",
+  "~/Library/Application Support/Cursor/CachedData",
+  "~/Library/Application Support/Cursor/Code Cache",
+  "~/Library/Application Support/Cursor/GPUCache",
+  "~/Library/Application Support/Cursor/CachedExtensionVSIXs",
+  "~/Library/Caches/com.todesktop.230313mzl4w4u92",
+]
+action = "trash"
+requires_quit = ["Cursor"]
+regenerates = true
+
+[[rule]]
+id = "ai.local-models"
+title = "Local AI models"
+description = "Downloaded model weights (Ollama, LM Studio, Hugging Face hub, Whisper). Not recreated by themselves: re-downloading can take many GB and hours."
+category = "ai-tools"
+risk = "manual"
+detector = "paths"
+roots = [
+  "~/.ollama/models",
+  "~/.lmstudio/models",
+  "~/.cache/huggingface",
+  "~/.cache/whisper",
+]
+action = "trash"
+requires_quit = ["ollama", "Ollama", "LM Studio"]
+
+# ─── Package manager caches ─────────────────────────────────────────────────
+
+[[rule]]
 id = "cache.npm"
 title = "npm cache"
 description = "npm's content-addressable package cache. npm re-downloads packages on demand."
@@ -28,11 +233,523 @@ action = "trash"
 regenerates = true
 
 [[rule]]
+id = "cache.npx"
+title = "npx cache"
+description = "Packages npx installed to run one-off commands. Re-installed the next time you run them."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/.npm/_npx"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.yarn"
+title = "Yarn cache"
+description = "Yarn's package cache (classic and Berry global cache). Re-downloaded on the next install."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/Yarn", "~/.yarn/berry/cache"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.pnpm"
+title = "pnpm cache"
+description = "pnpm's metadata and download cache. Rebuilt on the next install."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/pnpm"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.pnpm-store"
+title = "pnpm store"
+description = "pnpm's global content-addressable store. node_modules hard-link into it, so only packages no project uses are actually freed (`pnpm store prune` does exactly that); the next install re-downloads what is missing."
+category = "package-caches"
+risk = "review"
+detector = "paths"
+roots = ["~/Library/pnpm/store"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.pip"
+title = "pip cache"
+description = "pip's wheel and HTTP cache. Re-downloaded on the next install."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/pip", "~/.cache/pip"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.poetry"
+title = "Poetry cache"
+description = "Poetry's package cache and downloaded artifacts (virtualenvs are left alone). Re-downloaded on the next install."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/pypoetry/cache", "~/Library/Caches/pypoetry/artifacts"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.uv"
+title = "uv cache"
+description = "uv's package cache. Re-downloaded on demand; environments that hard-link into it keep working."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/.cache/uv"]
+action = "trash"
+requires_quit = ["uv"]
+regenerates = true
+
+[[rule]]
+id = "cache.cargo"
+title = "Cargo registry cache"
+description = "Downloaded crate archives and their extracted sources. Cargo fetches them again on the next build."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/.cargo/registry/cache", "~/.cargo/registry/src"]
+action = "trash"
+requires_quit = ["cargo"]
+regenerates = true
+
+[[rule]]
+id = "cache.homebrew"
+title = "Homebrew cache"
+description = "Downloaded bottles and source archives. Homebrew downloads them again when needed (`brew cleanup` keeps a subset)."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/Homebrew"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.cypress"
+title = "Cypress binaries"
+description = "Downloaded Cypress test-runner apps. Cypress needs `npx cypress install` (or a fresh npm install) before the next run."
+category = "package-caches"
+risk = "review"
+detector = "paths"
+roots = ["~/Library/Caches/Cypress"]
+action = "trash"
+requires_quit = ["Cypress"]
+regenerates = true
+
+[[rule]]
+id = "cache.puppeteer"
+title = "Puppeteer browsers"
+description = "Chrome builds downloaded by Puppeteer. Puppeteer needs `npx puppeteer browsers install` (or a fresh npm install) before the next run."
+category = "package-caches"
+risk = "review"
+detector = "paths"
+roots = ["~/.cache/puppeteer"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.playwright"
+title = "Playwright browsers"
+description = "Browsers downloaded by Playwright. Run `npx playwright install` before the next test run."
+category = "package-caches"
+risk = "review"
+detector = "paths"
+roots = ["~/Library/Caches/ms-playwright"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.node-gyp"
+title = "node-gyp headers"
+description = "Node.js headers for building native modules. Downloaded again on the next native build."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/node-gyp", "~/.node-gyp", "~/.cache/node-gyp"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.typescript"
+title = "TypeScript typings cache"
+description = "Type definitions editors fetch automatically for JavaScript projects. Fetched again on demand."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/typescript"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.gradle"
+title = "Gradle caches"
+description = "Downloaded dependencies, build cache and Gradle distributions. Re-downloaded on the next build."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/.gradle/caches", "~/.gradle/wrapper/dists"]
+action = "trash"
+requires_quit = ["java"]
+regenerates = true
+
+[[rule]]
+id = "cache.cocoapods"
+title = "CocoaPods cache"
+description = "Downloaded pod sources and specs. Fetched again on the next `pod install`."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/CocoaPods"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.prisma"
+title = "Prisma engines"
+description = "Query/schema engines downloaded by Prisma. Downloaded again on the next `prisma generate`."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/.cache/prisma"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.mongodb-binaries"
+title = "MongoDB test binaries"
+description = "mongod builds downloaded by mongodb-memory-server for tests. Downloaded again on the next test run."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/.cache/mongodb-binaries"]
+action = "trash"
+requires_quit = ["mongod"]
+regenerates = true
+
+[[rule]]
+id = "cache.corepack"
+title = "Corepack cache"
+description = "Package-manager versions (pnpm, Yarn) downloaded by Corepack. Downloaded again on first use."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/.cache/node/corepack"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.bun"
+title = "Bun install cache"
+description = "Bun's global package cache. Re-downloaded on the next install."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/.bun/install/cache"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.go-build"
+title = "Go build cache"
+description = "Compiled Go packages. Rebuilt on the next build (`go clean -cache` does the same)."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/go-build"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "cache.deno"
+title = "Deno cache"
+description = "Downloaded remote modules and compiled code. Fetched again on demand."
+category = "package-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/deno"]
+action = "trash"
+regenerates = true
+
+# ─── Xcode ──────────────────────────────────────────────────────────────────
+
+[[rule]]
+id = "xcode.derived-data"
+title = "Xcode DerivedData"
+description = "Build products and indexes of Xcode projects. Rebuilt on the next build (slower first build)."
+category = "xcode"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Developer/Xcode/DerivedData"]
+action = "trash"
+requires_quit = ["Xcode"]
+regenerates = true
+
+[[rule]]
+id = "xcode.caches"
+title = "Xcode caches"
+description = "Xcode's own caches (documentation, downloads metadata). Rebuilt automatically."
+category = "xcode"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/com.apple.dt.Xcode"]
+action = "trash"
+requires_quit = ["Xcode"]
+regenerates = true
+
+[[rule]]
+id = "xcode.archives"
+title = "Xcode archives"
+description = "App archives created for distribution, with the debug symbols needed to read crash reports of those builds. Not recreated."
+category = "xcode"
+risk = "manual"
+detector = "paths"
+roots = ["~/Library/Developer/Xcode/Archives"]
+action = "trash"
+
+[[rule]]
+id = "xcode.device-support"
+title = "Device support files"
+description = "Debug symbols copied from each iPhone/Watch/TV OS version you connected. Copied again when such a device is connected for debugging."
+category = "xcode"
+risk = "review"
+detector = "paths"
+roots = [
+  "~/Library/Developer/Xcode/iOS DeviceSupport/*",
+  "~/Library/Developer/Xcode/watchOS DeviceSupport/*",
+  "~/Library/Developer/Xcode/tvOS DeviceSupport/*",
+  "~/Library/Developer/Xcode/visionOS DeviceSupport/*",
+]
+action = "trash"
+requires_quit = ["Xcode"]
+regenerates = true
+
+[[rule]]
+id = "xcode.coresimulator-caches"
+title = "Simulator caches"
+description = "Dyld and asset caches of the iOS Simulator. Rebuilt the next time a simulator boots."
+category = "xcode"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Developer/CoreSimulator/Caches"]
+action = "trash"
+requires_quit = ["Simulator"]
+regenerates = true
+
+[[rule]]
+id = "xcode.simulator-runtimes"
+title = "Unusable or duplicate simulator runtimes"
+description = "Simulator runtimes that are unusable or installed twice, removed with `xcrun simctl runtime delete`, plus simulators whose runtime is gone (`xcrun simctl delete unavailable`). Re-download a runtime from Xcode > Settings > Components."
+category = "xcode"
+risk = "review"
+detector = "simulator-runtimes"
+action = "command"
+requires_quit = ["Simulator"]
+
+# ─── Downloads ──────────────────────────────────────────────────────────────
+
+[[rule]]
+id = "downloads.installers"
+title = "Old installers"
+description = "Disk images and installer packages (.dmg, .pkg, .iso, .xip) older than a week. The installed apps keep working; download the installer again if you need it."
+category = "downloads"
+risk = "review"
+detector = "installers"
+roots = ["~/Downloads"]
+action = "trash"
+
+[[rule]]
+id = "downloads.redundant-archives"
+title = "Already-extracted archives"
+description = "Archives (.zip, .tar.gz, .rar, .7z) whose extracted folder or app sits next to them. The extracted copy stays; the archive itself is not recreated."
+category = "downloads"
+risk = "review"
+detector = "redundant-archives"
+roots = ["~/Downloads"]
+action = "trash"
+
+[[rule]]
+id = "downloads.versioned-siblings"
+title = "Older versions of the same download"
+description = "Files and folders that differ only by a date or version in the name (DB dumps, exports, backups). The newest is kept; older versions are not recreated."
+category = "downloads"
+risk = "manual"
+detector = "versioned-siblings"
+roots = ["~/Downloads"]
+action = "trash"
+
+[rule.params]
+depth = 3
+
+[[rule]]
 id = "downloads.old-files"
 title = "Old downloads"
-description = "Items in Downloads not opened or modified for a while. Review before removing."
+description = "Items in Downloads not opened or modified for 30 days. Review before removing; they are not recreated."
 category = "downloads"
 risk = "manual"
 detector = "older-than"
 roots = ["~/Downloads"]
 action = "trash"
+
+[rule.params]
+days = 30
+
+# ─── Development ────────────────────────────────────────────────────────────
+
+[[rule]]
+id = "dev.stale-artifacts"
+title = "Build artifacts of inactive projects"
+description = "node_modules, target, build output and virtualenvs of projects with no file change and no commit for 60 days. Recreated by the project's install/build command."
+category = "dev-artifacts"
+risk = "review"
+detector = "stale-artifacts"
+roots = ["~/Developer"]
+action = "trash"
+regenerates = true
+
+[rule.params]
+names = [
+  "node_modules",
+  "target",
+  ".next",
+  "dist",
+  "build",
+  "DerivedData",
+  ".turbo",
+  ".venv",
+  "Pods",
+  ".gradle",
+  ".nuxt",
+  ".svelte-kit",
+  ".parcel-cache",
+  ".angular",
+]
+
+[[rule]]
+id = "dev.git-worktrees"
+title = "Git worktrees"
+description = "Linked git worktrees (e.g. from Claude Code) and leftover worktree folders. Removed with `git worktree remove`; the branch and its commits stay in the repository."
+category = "worktrees"
+risk = "review"
+detector = "git-worktrees"
+roots = ["~/Developer"]
+action = "git-worktree-remove"
+
+# ─── Containers ─────────────────────────────────────────────────────────────
+
+[[rule]]
+id = "containers.docker"
+title = "Docker unused data"
+description = "Stopped containers, dangling images and build cache, removed with `docker system prune -f` (volumes and tagged images are never touched). Docker Desktop returns the space to macOS gradually."
+category = "containers"
+risk = "review"
+detector = "docker"
+roots = ["~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"]
+action = "command"
+
+# ─── System and apps ────────────────────────────────────────────────────────
+
+[[rule]]
+id = "system.aerial-wallpapers"
+title = "Aerial wallpaper videos"
+description = "Downloaded macOS Aerial wallpaper and screen-saver videos. macOS downloads again the ones you select."
+category = "system"
+risk = "review"
+detector = "paths"
+roots = ["~/Library/Application Support/com.apple.wallpaper/aerials/videos"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "apps.updater-caches"
+title = "App updater caches"
+description = "Downloaded app updates (Electron `*-updater` and Squirrel `*.ShipIt` folders). Already installed or downloaded again by the next update check."
+category = "app-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/*-updater", "~/Library/Caches/*.ShipIt"]
+action = "trash"
+regenerates = true
+
+[[rule]]
+id = "apps.vscode.caches"
+title = "VS Code caches"
+description = "Chromium caches, cached data and downloaded extension packages of VS Code. Rebuilt automatically; settings and extensions stay."
+category = "app-caches"
+risk = "safe"
+detector = "paths"
+roots = [
+  "~/Library/Application Support/Code/Cache",
+  "~/Library/Application Support/Code/CachedData",
+  "~/Library/Application Support/Code/Code Cache",
+  "~/Library/Application Support/Code/GPUCache",
+  "~/Library/Application Support/Code/CachedExtensionVSIXs",
+]
+action = "trash"
+requires_quit = ["Code"]
+regenerates = true
+
+[[rule]]
+id = "apps.spotify.cache"
+title = "Spotify cache"
+description = "Streamed music cache. Rebuilt as you listen; downloaded (offline) songs live elsewhere and stay."
+category = "app-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/com.spotify.client", "~/Library/Application Support/Spotify/PersistentCache"]
+action = "trash"
+requires_quit = ["Spotify"]
+regenerates = true
+
+[[rule]]
+id = "apps.chrome.cache"
+title = "Chrome cache"
+description = "Google Chrome's disk cache. Rebuilt as you browse; history, passwords and logins stay."
+category = "app-caches"
+risk = "safe"
+detector = "paths"
+roots = ["~/Library/Caches/Google/Chrome"]
+action = "trash"
+requires_quit = ["Google Chrome"]
+regenerates = true
+
+[[rule]]
+id = "apps.slack.cache"
+title = "Slack cache"
+description = "Slack's Chromium and service-worker caches (direct download and App Store versions). Rebuilt automatically; messages are on Slack's servers."
+category = "app-caches"
+risk = "safe"
+detector = "paths"
+roots = [
+  "~/Library/Application Support/Slack/Cache",
+  "~/Library/Application Support/Slack/Service Worker/CacheStorage",
+  "~/Library/Containers/com.tinyspeck.slackmacgap/Data/Library/Application Support/Slack/Cache",
+  "~/Library/Containers/com.tinyspeck.slackmacgap/Data/Library/Application Support/Slack/Service Worker/CacheStorage",
+]
+action = "trash"
+requires_quit = ["Slack"]
+regenerates = true
+
+[[rule]]
+id = "apps.discord.cache"
+title = "Discord cache"
+description = "Discord's Chromium caches. Rebuilt automatically."
+category = "app-caches"
+risk = "safe"
+detector = "paths"
+roots = [
+  "~/Library/Application Support/discord/Cache",
+  "~/Library/Application Support/discord/Code Cache",
+  "~/Library/Application Support/discord/GPUCache",
+]
+action = "trash"
+requires_quit = ["Discord"]
+regenerates = true
