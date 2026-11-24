@@ -317,7 +317,7 @@ conflict waiting to happen — report the need instead.
 - CLI layout: one file per subcommand in `crates/cmm-cli/src/cmd/<name>.rs`; `main.rs` only parses and dispatches.
   `cmm scan` records the report to history unless `--no-record` (ignore `CoreError::Unimplemented` until S3 lands).
 - S2 may add one-line `mod` declarations to `detectors/mod.rs` for its own helper files; everything else in that file is S1's.
-- Run pnpm as `corepack pnpm …`
+- Run pnpm as `corepack pnpm …` (global pnpm shim is broken on this machine); `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` for non-interactive runs.
 
 ### Contract v2 (integration of S1–S4)
 
@@ -356,7 +356,7 @@ conflict waiting to happen — report the need instead.
      worktree's `.git` file) to the Trash. Restoring both restores a working worktree. No `git worktree prune`.
    - `Delete`: `git -C <repo> worktree remove <path>` (no `--force`).
    - Detectors use the same status flags.
-   - The standalone `git worktree prune` finding stays (it only touches entries whose folder is already gone), but it is
+   - (Superseded: the prune finding is now info-only, see "Re-review follow-ups".) The standalone `git worktree prune` finding stays (it only touches entries whose folder is already gone), but it is
      `review`, never preselected.
 4. **Claude Code transcripts must never take `memory/` with them.** `older-than` gains `params.exclude` (child names
    never proposed). The transcripts rules target the children of each project folder (`projects/*`), exclude
@@ -365,8 +365,8 @@ conflict waiting to happen — report the need instead.
 5. **Audit log is mandatory.** The app and the CLI refuse to execute (non-dry-run) when the history DB can't be
    opened. A failed audit write after an action keeps the item `Done` but adds "audit log write failed" to its message.
 6. **Command argv must match an exact per-detector pattern** (defense in depth on top of #1): `docker system prune -f`;
-   `xcrun simctl delete unavailable`; `xcrun simctl runtime delete <UUID>`; `git -C <abs repo> worktree prune`;
-   `git -C <abs repo> worktree remove <abs path>`. Anything else is refused even if `argv[0]` is allowlisted. (global pnpm shim is broken on this machine); `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` for non-interactive runs.
+   `xcrun simctl delete unavailable`; `xcrun simctl runtime delete <UUID>`;
+   `git -C <abs repo> worktree remove <abs path>`. Anything else is refused even if `argv[0]` is allowlisted.
 
 Quality bar for every stream: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace`; desktop also `pnpm -w lint` and `pnpm -w typecheck`. Filesystem tests use
@@ -380,8 +380,7 @@ Quality bar for every stream: `cargo fmt --check`, `cargo clippy --workspace --a
   worktrees of repos with **no remote** are always blocked (safe default).
 - Orphan worktree folders that still contain a `.git` file are blocked (the guard would refuse them anyway).
 - Known residual risks (documented, not fixed): files hidden via `assume-unchanged`/`skip-worktree` are invisible to
-  `git status`; running the standalone `git worktree prune` finding drops admin data of a worktree whose disk is only
-  unmounted (its reason text says so); `cmm clean` scans twice.
+  `git status`; `cmm clean` scans twice.
 
 ### Re-review follow-ups (after a28953e)
 
@@ -391,3 +390,5 @@ Quality bar for every stream: `cargo fmt --check`, `cargo clippy --workspace --a
 - **Fresh-match also compares size:** a path finding is acted on only if the fresh `bytes` are within
   `max(10 %, 10 MiB)` of what the user saw, and file-vs-folder kind is unchanged; otherwise `Skipped`
   ("changed since the scan: X → Y, rescan"). Command findings are exempt (they are sized from tool output).
+- As shipped (1367a55): the file-vs-folder check is inferred (`files == 1` means "was a file"), because `Finding` has
+  no kind field. Follow-up: add `is_dir: bool` to `Finding` for an exact check.
