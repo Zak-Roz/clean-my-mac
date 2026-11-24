@@ -10,6 +10,8 @@ use cmm_core::{Config, rules};
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
 
+mod cmd;
+
 #[derive(Debug, Parser)]
 #[command(name = "cmm", version, about = "Rule-based macOS disk cleaner")]
 struct Cli {
@@ -91,8 +93,10 @@ fn run(command: Command) -> Result<ExitCode> {
     match command {
         Command::Rules { json } => cmd_rules(json),
         Command::Scan { json, categories, rules } => cmd_scan(json, categories, rules),
-        Command::Clean { .. } => not_implemented("clean"),
-        Command::History { .. } => not_implemented("history"),
+        Command::Clean { ids, rules, safe, delete, yes } => {
+            cmd::clean::run(cmd::clean::Args { ids, rules, safe, delete, yes })
+        }
+        Command::History { days, json } => cmd::history::run(days, json),
         Command::Du { .. } => not_implemented("du"),
     }
 }
