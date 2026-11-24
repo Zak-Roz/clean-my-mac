@@ -331,7 +331,36 @@ conflict waiting to happen — report the need instead.
 - History records only unfiltered scans (`cmm scan` without `--category`/`--rule`, and the app's full scan).
 - The desktop app persists the last report to `data_dir/last-report.json` and loads it at startup.
 - No "Empty Trash" action for now (it would also erase unrelated user files); the app offers `reveal_trash()`
-  (opens `~/.Trash` in Finder) instead. (global pnpm shim is broken on this machine); `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` for non-interactive runs.
+  (opens `~/.Trash` in Finder) instead.
+
+### Safety fixes after the delete-path review (supersede anything above that conflicts)
+
+1. **Never act on a stored report.** Core gets `actions::execute_fresh(rules, req, config, home, history, on_item)`:
+   it re-runs `scan_at` scoped to the rule ids of the requested findings, then acts only on findings that exist in
+   the fresh report with the **same id, same action and same command argv, and no blockers**; anything else is
+   `Skipped` ("no longer matches the scan"). Both `cmm clean` and the app's `execute_clean` use it. The stored
+   report (`last-report.json`, in-memory state) is for display and selection only.
+2. **Guard: any `.git` entry blocks Trash/Delete.** A target that is or contains a `.git` file **or** directory is
+   refused, except for `git-worktree-remove` findings, whose own top-level `.git` file is expected.
+3. **Worktrees — no repo-wide prune, full re-check at execution.** Re-check right before acting: clean status via
+   `git status --porcelain --untracked-files=all --ignore-submodules=none` (overrides user config), not locked,
+   no commits unreachable from remotes (`git rev-list HEAD --not --remotes` empty), and no `modules/` in its admin
+   dir (submodules → refuse, like `git worktree remove`). Any failure → `Skipped` with the reason.
+   - `Trash`: move the worktree folder **and** its own admin dir (`<repo>/.git/worktrees/<id>`, resolved from the
+     worktree's `.git` file) to the Trash. Restoring both restores a working worktree. No `git worktree prune`.
+   - `Delete`: `git -C <repo> worktree remove <path>` (no `--force`).
+   - Detectors use the same status flags.
+   - The standalone `git worktree prune` finding stays (it only touches entries whose folder is already gone), but it is
+     `review`, never preselected.
+4. **Claude Code transcripts must never take `memory/` with them.** `older-than` gains `params.exclude` (child names
+   never proposed). The transcripts rules target the children of each project folder (`projects/*`), exclude
+   `memory`, set `group` to the project folder, and use a rule-level `params.min_bytes` (5 MiB) that replaces the
+   global `min_finding_bytes` for that rule.
+5. **Audit log is mandatory.** The app and the CLI refuse to execute (non-dry-run) when the history DB can't be
+   opened. A failed audit write after an action keeps the item `Done` but adds "audit log write failed" to its message.
+6. **Command argv must match an exact per-detector pattern** (defense in depth on top of #1): `docker system prune -f`;
+   `xcrun simctl delete unavailable`; `xcrun simctl runtime delete <UUID>`; `git -C <abs repo> worktree prune`;
+   `git -C <abs repo> worktree remove <abs path>`. Anything else is refused even if `argv[0]` is allowlisted. (global pnpm shim is broken on this machine); `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` for non-interactive runs.
 
 Quality bar for every stream: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace`; desktop also `pnpm -w lint` and `pnpm -w typecheck`. Filesystem tests use
