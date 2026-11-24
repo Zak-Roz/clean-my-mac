@@ -1,0 +1,242 @@
+@import "tailwindcss";
+
+/*
+ * Semantic tokens. Light values here, dark values below; Tailwind utilities (`bg-surface`,
+ * `text-fg-2`, `border-line`…) read the variables, so every component follows the system
+ * appearance without `dark:` variants.
+ */
+:root {
+  color-scheme: light;
+  --bg: #f5f5f7;
+  --sidebar: #e9e9ee;
+  --surface: #ffffff;
+  --surface-2: #f2f2f5;
+  --surface-3: #e6e6eb;
+  --fg: #1d1d1f;
+  --fg-2: #5f5f64;
+  --fg-3: #7a7a80;
+  --line: rgb(0 0 0 / 0.09);
+  --line-strong: rgb(0 0 0 / 0.16);
+  --accent: #007aff;
+  --accent-hover: #0067d6;
+  --accent-soft: rgb(0 122 255 / 0.12);
+  --on-accent: #ffffff;
+
+  /* Status (fixed roles; always paired with an icon or a label). */
+  --good: #0ca30c;
+  --good-text: #006300;
+  --good-soft: rgb(12 163 12 / 0.13);
+  --warn: #e0a000;
+  --warn-text: #7a5200;
+  --warn-soft: rgb(250 178 25 / 0.2);
+  --critical: #d03b3b;
+  --critical-text: #b42323;
+  --critical-soft: rgb(208 59 59 / 0.12);
+
+  /* Charts. */
+  --series: #2a78d6;
+  --series-soft: rgb(42 120 214 / 0.1);
+  --neutral-mark: #b9b9bf;
+  --track: #e3e3e8;
+  --grow: #d95926;
+  --shrink: #2a78d6;
+  --grid: #e6e6e1;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #1c1c1e;
+    --sidebar: #252527;
+    --surface: #2a2a2d;
+    --surface-2: #323236;
+    --surface-3: #3c3c41;
+    --fg: #f2f2f5;
+    --fg-2: #ababb0;
+    --fg-3: #8d8d93;
+    --line: rgb(255 255 255 / 0.09);
+    --line-strong: rgb(255 255 255 / 0.17);
+    --accent: #0a84ff;
+    --accent-hover: #3d9bff;
+    --accent-soft: rgb(10 132 255 / 0.2);
+    --on-accent: #ffffff;
+
+    --good: #0ca30c;
+    --good-text: #4cd964;
+    --good-soft: rgb(12 163 12 / 0.22);
+    --warn: #fab219;
+    --warn-text: #fab219;
+    --warn-soft: rgb(250 178 25 / 0.16);
+    --critical: #e5534b;
+    --critical-text: #ff7b72;
+    --critical-soft: rgb(229 83 75 / 0.18);
+
+    --series: #3987e5;
+    --series-soft: rgb(57 135 229 / 0.14);
+    --neutral-mark: #5c5c62;
+    --track: #3a3a3f;
+    --grow: #e0703f;
+    --shrink: #3987e5;
+    --grid: #38383c;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1c1c1e;
+  --sidebar: #252527;
+  --surface: #2a2a2d;
+  --surface-2: #323236;
+  --surface-3: #3c3c41;
+  --fg: #f2f2f5;
+  --fg-2: #ababb0;
+  --fg-3: #8d8d93;
+  --line: rgb(255 255 255 / 0.09);
+  --line-strong: rgb(255 255 255 / 0.17);
+  --accent: #0a84ff;
+  --accent-hover: #3d9bff;
+  --accent-soft: rgb(10 132 255 / 0.2);
+  --on-accent: #ffffff;
+  --good: #0ca30c;
+  --good-text: #4cd964;
+  --good-soft: rgb(12 163 12 / 0.22);
+  --warn: #fab219;
+  --warn-text: #fab219;
+  --warn-soft: rgb(250 178 25 / 0.16);
+  --critical: #e5534b;
+  --critical-text: #ff7b72;
+  --critical-soft: rgb(229 83 75 / 0.18);
+  --series: #3987e5;
+  --series-soft: rgb(57 135 229 / 0.14);
+  --neutral-mark: #5c5c62;
+  --track: #3a3a3f;
+  --grow: #e0703f;
+  --shrink: #3987e5;
+  --grid: #38383c;
+}
+
+@theme inline {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+
+  --color-bg: var(--bg);
+  --color-sidebar: var(--sidebar);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-fg-3: var(--fg-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-good: var(--good);
+  --color-good-text: var(--good-text);
+  --color-good-soft: var(--good-soft);
+  --color-warn: var(--warn);
+  --color-warn-text: var(--warn-text);
+  --color-warn-soft: var(--warn-soft);
+  --color-critical: var(--critical);
+  --color-critical-text: var(--critical-text);
+  --color-critical-soft: var(--critical-soft);
+  --color-series: var(--series);
+  --color-series-soft: var(--series-soft);
+  --color-neutral-mark: var(--neutral-mark);
+  --color-track: var(--track);
+  --color-grow: var(--grow);
+  --color-shrink: var(--shrink);
+  --color-grid: var(--grid);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    /* A window, not a page: only the content panes scroll. */
+    overflow: hidden;
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.35;
+    -webkit-font-smoothing: antialiased;
+    /* Desktop app: no rubber-band page, no accidental text selection in chrome. */
+    overscroll-behavior: none;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+  }
+
+  /* Paths, reasons and messages stay selectable/copyable. */
+  .selectable {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    accent-color: var(--accent);
+    width: 14px;
+    height: 14px;
+    margin: 0;
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--accent-soft);
+    outline-offset: 1px;
+    border-radius: 4px;
+  }
+
+  button {
+    cursor: default;
+  }
+}
+
+@keyframes indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@utility animate-indeterminate {
+  animation: indeterminate 1.2s ease-in-out infinite;
+}
+
+@utility animate-fade-in {
+  animation: fade-in 120ms ease-out;
+}
+
+@utility animate-dialog-in {
+  animation: dialog-in 140ms ease-out;
+}

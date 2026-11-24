@@ -4,19 +4,27 @@
   "version": "0.1.0",
   "identifier": "com.zak-roz.clean-my-mac",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "corepack pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "corepack pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "clean-my-mac",
-        "width": 1100,
-        "height": 760,
-        "minWidth": 800,
-        "minHeight": 560
+        "width": 1120,
+        "height": 780,
+        "minWidth": 880,
+        "minHeight": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 24
+        },
+        "center": true
       }
     ],
     "security": {
