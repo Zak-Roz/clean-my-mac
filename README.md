@@ -205,6 +205,21 @@ builds the same app locally, signed ad hoc.
 
 ## Development
 
-See [`CLAUDE.md`](CLAUDE.md) for commands (`cargo test --workspace`, `corepack pnpm -w lint`,
-`corepack pnpm --filter desktop tauri dev`, …) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-for the contract.
+```bash
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all
+cargo run -p cmm-cli -- scan                 # read-only
+corepack pnpm install
+corepack pnpm -w lint && corepack pnpm -w typecheck
+corepack pnpm --filter desktop test          # Vitest
+corepack pnpm --filter desktop tauri dev     # the app; see apps/desktop/README.md for mock mode
+```
+
+The TypeScript types in `apps/desktop/src/bindings/` are generated from the Rust model by ts-rs
+(`cargo test -p cmm-core export_bindings`); don't edit them by hand. Tests build their fixtures in
+temporary directories and never touch your home folder.
+
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) describes the design: data model, core API, rule
+format, detectors, safety invariants and the decisions behind them.
