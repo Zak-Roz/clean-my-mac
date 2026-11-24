@@ -9,12 +9,15 @@ use crate::size::SizeInfo;
 
 pub mod archives;
 pub mod docker;
+pub mod external;
 pub mod git_worktrees;
 pub mod installers;
+pub mod naming;
 pub mod older_than;
 pub mod paths;
 pub mod simulators;
 pub mod stale_artifacts;
+pub mod support;
 pub mod versioned;
 
 /// Turns one rule into findings. Must be read-only: detectors never modify the filesystem.
