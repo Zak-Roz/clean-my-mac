@@ -118,12 +118,12 @@ fn parse_outcome(text: &str) -> Result<CleanOutcome, CoreError> {
 }
 
 /// What an executed item actually did: the finding's action combined with the clean mode
-/// (`Trash`/`Delete` findings follow the mode; worktree removal and commands are what they are).
+/// (`Trash`/`Delete` and worktree findings follow the mode; commands are what they are).
 pub fn action_label(action: ActionKind, mode: CleanMode) -> &'static str {
     match (action, mode) {
-        (ActionKind::Trash | ActionKind::Delete, CleanMode::Trash) => "trash",
+        (ActionKind::Trash | ActionKind::Delete | ActionKind::GitWorktreeRemove, CleanMode::Trash) => "trash",
         (ActionKind::Trash | ActionKind::Delete, CleanMode::Delete) => "delete",
-        (ActionKind::GitWorktreeRemove, _) => "git-worktree-remove",
+        (ActionKind::GitWorktreeRemove, CleanMode::Delete) => "git-worktree-remove",
         (ActionKind::Command, _) => "command",
         (ActionKind::InfoOnly, _) => "info-only",
     }
@@ -686,5 +686,7 @@ mod tests {
         assert_eq!(action_label(ActionKind::Delete, CleanMode::Trash), "trash", "Trash mode always wins");
         assert_eq!(action_label(ActionKind::Trash, CleanMode::Delete), "delete");
         assert_eq!(action_label(ActionKind::Command, CleanMode::Trash), "command");
+        assert_eq!(action_label(ActionKind::GitWorktreeRemove, CleanMode::Trash), "trash");
+        assert_eq!(action_label(ActionKind::GitWorktreeRemove, CleanMode::Delete), "git-worktree-remove");
     }
 }

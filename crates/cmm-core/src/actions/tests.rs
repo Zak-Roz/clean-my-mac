@@ -1,5 +1,6 @@
-//! Tempdir tests for plan/execute. Nothing here touches the real home directory, except the
-//! `#[ignore]`d Trash test (NSFileManager moves the temp file into the real ~/.Trash).
+//! Tempdir tests for plan/execute. Nothing here touches the real home directory: `ExecuteEnv::trash`
+//! is a fake that moves items into `<tempdir>/Trash`, except in the `#[ignore]`d Trash test
+//! (NSFileManager moves the temp file into the real ~/.Trash).
 
 use std::cell::RefCell;
 use std::fs;
@@ -66,13 +67,25 @@ fn fixture() -> Fx {
         rule("tool.cmd", &[], ActionKind::Command, &[]),
         rule("info.only", &["~/Library/Caches/*"], ActionKind::InfoOnly, &[]),
     ];
+    let fake_trash = tmp.path().join("Trash");
+    fs::create_dir_all(&fake_trash).unwrap();
     let env = ExecuteEnv {
         home: home.clone(),
         rules,
         extra_protected: vec![],
         processes: Box::new(|| ProcessSnapshot::from_names(Vec::<String>::new())),
+        trash: Box::new(move |p: &Path| {
+            fs::rename(p, fake_trash.join(p.file_name().unwrap())).map_err(|e| format!("fake trash: {e}"))
+        }),
     };
     Fx { tmp, home, env }
+}
+
+impl Fx {
+    /// Where the fake `ExecuteEnv::trash` puts things.
+    fn trash(&self) -> PathBuf {
+        self.tmp.path().join("Trash")
+    }
 }
 
 fn finding(rule_id: &str, path: Option<&Path>, bytes: u64, action: ActionKind) -> Finding {
@@ -234,11 +247,17 @@ fn plan_warns_about_worktree_removal() {
         &["git", "-C", "/r", "worktree", "remove", &p.to_string_lossy()],
     );
     let rep = report(vec![wt.clone()]);
-    let plan = plan(&rep, &req(&[&wt], CleanMode::Trash, true)).unwrap();
-    assert_eq!(plan.items.len(), 1);
-    let w = plan.warnings.join("\n");
-    assert!(w.contains("git worktree remove") && w.contains("not via Trash"), "{w}");
-    assert!(!w.contains("Trash is emptied"), "no path items → no Trash warning: {w}");
+    // Worktrees follow the mode (contract v2): Trash mode → Trash + prune, frees nothing yet.
+    let trash = plan(&rep, &req(&[&wt], CleanMode::Trash, true)).unwrap();
+    assert_eq!(trash.items.len(), 1);
+    let w = trash.warnings.join("\n");
+    assert!(w.contains("Trash is emptied (7 B in 1 item(s))") && w.contains("then `git worktree prune`"), "{w}");
+    assert!(!w.contains("git worktree remove"), "{w}");
+    // Delete mode → `git worktree remove`, permanent.
+    let delete = plan(&rep, &req(&[&wt], CleanMode::Delete, true)).unwrap();
+    let w = delete.warnings.join("\n");
+    assert!(w.contains("removed with `git worktree remove`: permanent"), "{w}");
+    assert!(!w.contains("Trash is emptied") && !w.contains("Permanent delete:"), "no plain path items: {w}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -262,7 +281,7 @@ fn dry_run_has_no_side_effects() {
         assert!(msg(item(&res, &a)).starts_with("dry run"));
         match mode {
             CleanMode::Delete => assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (1010 + 100 + 50, 0)),
-            CleanMode::Trash => assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (50, 1010 + 100)),
+            CleanMode::Trash => assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (0, 1010 + 100 + 50)),
         }
     }
     assert!(h.join("Library/Caches/a/data/blob").exists());
@@ -460,8 +479,78 @@ fn worktree_finding(repo: &Path, wt: &Path, bytes: u64) -> Finding {
     )
 }
 
+/// Commits a `.gitignore` for `.env` and puts an ignored `.env` into the worktree.
+fn ignored_env(repo: &Path, wt: &Path) {
+    fs::write(wt.join(".gitignore"), ".env\n").unwrap();
+    git(wt, &["add", ".gitignore"]);
+    git(wt, &["commit", "-q", "-m", "ignore .env"]);
+    fs::write(wt.join(".env"), "SECRET=1").unwrap();
+    assert!(git(wt, &["status", "--porcelain"]).is_empty(), "ignored files keep the worktree clean");
+    assert!(repo.join(".git").is_dir() && wt.join(".git").is_file());
+}
+
 #[test]
-fn worktree_that_became_dirty_is_refused_clean_one_is_removed() {
+fn worktree_in_trash_mode_goes_to_the_trash_and_is_pruned() {
+    let fx = fixture();
+    let (repo, wt_path) = repo_with_worktree(&fx.home);
+    ignored_env(&repo, &wt_path);
+    let wt = worktree_finding(&repo, &wt_path, 50);
+    let rep = report(vec![wt.clone()]);
+    let history = History::open(&fx.tmp.path().join("data/history.sqlite")).unwrap();
+
+    let plan = plan(&rep, &req(&[&wt], CleanMode::Trash, false)).unwrap();
+    assert!(plan.warnings.iter().any(|w| w.contains("go to the Trash, then `git worktree prune`")), "{plan:?}");
+
+    let dry = run(&fx.env, &rep, &req(&[&wt], CleanMode::Trash, true), Some(&history));
+    assert_done!(item(&dry, &wt));
+    assert!(msg(item(&dry, &wt)).starts_with("dry run: would move to Trash, then run `git -C "), "{dry:?}");
+    assert!(wt_path.exists() && history.recent_actions(10).unwrap().is_empty());
+
+    let res = run(&fx.env, &rep, &req(&[&wt], CleanMode::Trash, false), Some(&history));
+    assert_done!(item(&res, &wt), "{:?}", item(&res, &wt));
+    assert!(msg(item(&res, &wt)).ends_with("worktree prune`"), "{}", msg(item(&res, &wt)));
+    assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (0, 50), "Trash frees nothing yet");
+    assert!(!wt_path.exists());
+    assert_eq!(fs::read_to_string(fx.trash().join("wt/.env")).unwrap(), "SECRET=1", "ignored files recoverable");
+    let list = git(&repo, &["worktree", "list", "--porcelain"]);
+    assert!(!list.contains("worktrees/wt") && !list.contains("prunable"), "entry pruned: {list}");
+    assert!(git(&repo, &["branch", "--list", "wt"]).contains("wt"), "branch (and its commits) kept");
+    assert!(repo.join("README").exists(), "main checkout untouched");
+
+    let log = history.recent_actions(10).unwrap();
+    assert_eq!(log.iter().map(|r| (r.mode.as_str(), r.outcome)).collect::<Vec<_>>(), [("trash", CleanOutcome::Done)]);
+}
+
+#[test]
+fn worktree_in_delete_mode_runs_git_worktree_remove() {
+    let fx = fixture();
+    let (repo, wt_path) = repo_with_worktree(&fx.home);
+    ignored_env(&repo, &wt_path);
+    let wt = worktree_finding(&repo, &wt_path, 50);
+    let rep = report(vec![wt.clone()]);
+    let history = History::open(&fx.tmp.path().join("data/history.sqlite")).unwrap();
+
+    let plan = plan(&rep, &req(&[&wt], CleanMode::Delete, false)).unwrap();
+    assert!(plan.warnings.iter().any(|w| w.contains("removed with `git worktree remove`: permanent")), "{plan:?}");
+
+    let res = run(&fx.env, &rep, &req(&[&wt], CleanMode::Delete, false), Some(&history));
+    assert_done!(item(&res, &wt), "{:?}", item(&res, &wt));
+    assert_eq!(msg(item(&res, &wt)), "removed git worktree");
+    assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (50, 0));
+    assert!(!wt_path.exists());
+    assert_eq!(fs::read_dir(fx.trash()).unwrap().count(), 0, "nothing went through the Trash");
+    assert!(!git(&repo, &["worktree", "list", "--porcelain"]).contains("worktrees/wt"));
+    assert!(git(&repo, &["branch", "--list", "wt"]).contains("wt"), "branch (and its commits) kept");
+
+    let log = history.recent_actions(10).unwrap();
+    assert_eq!(
+        log.iter().map(|r| (r.mode.as_str(), r.outcome)).collect::<Vec<_>>(),
+        [("git-worktree-remove", CleanOutcome::Done)]
+    );
+}
+
+#[test]
+fn worktree_that_became_dirty_is_refused_in_both_modes() {
     let fx = fixture();
     let (repo, wt_path) = repo_with_worktree(&fx.home);
     let wt = worktree_finding(&repo, &wt_path, 50);
@@ -471,26 +560,54 @@ fn worktree_that_became_dirty_is_refused_clean_one_is_removed() {
     // Dirty after the scan: an untracked file and a modified tracked file.
     fs::write(wt_path.join("new.txt"), "work in progress").unwrap();
     fs::write(wt_path.join("README"), "changed").unwrap();
-    let res = run(&fx.env, &rep, &req(&[&wt], CleanMode::Trash, false), Some(&history));
-    assert_failed!(item(&res, &wt));
-    assert!(msg(item(&res, &wt)).contains("uncommitted changes (2 path(s))"), "{}", msg(item(&res, &wt)));
-    assert!(wt_path.join("new.txt").exists());
-
-    // Clean again → removed via `git worktree remove`, counted as freed (not Trash).
-    fs::remove_file(wt_path.join("new.txt")).unwrap();
-    git(&wt_path, &["checkout", "-q", "--", "README"]);
-    let res = run(&fx.env, &rep, &req(&[&wt], CleanMode::Trash, false), Some(&history));
-    assert_done!(item(&res, &wt), "{:?}", item(&res, &wt));
-    assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (50, 0));
-    assert!(!wt_path.exists());
-    assert!(!git(&repo, &["worktree", "list"]).contains("worktrees/wt"));
-    assert!(git(&repo, &["branch", "--list", "wt"]).contains("wt"), "branch (and its commits) kept");
+    for mode in [CleanMode::Trash, CleanMode::Delete] {
+        let res = run(&fx.env, &rep, &req(&[&wt], mode, false), Some(&history));
+        assert_failed!(item(&res, &wt));
+        assert!(msg(item(&res, &wt)).contains("uncommitted changes (2 path(s))"), "{}", msg(item(&res, &wt)));
+        assert_eq!((res.freed_bytes, res.moved_to_trash_bytes), (0, 0));
+    }
+    assert!(wt_path.join("new.txt").exists() && git(&repo, &["worktree", "list"]).contains("worktrees/wt"));
+    assert_eq!(fs::read_dir(fx.trash()).unwrap().count(), 0);
 
     let log = history.recent_actions(10).unwrap();
     assert_eq!(
         log.iter().map(|r| (r.mode.as_str(), r.outcome)).collect::<Vec<_>>(),
-        [("git-worktree-remove", CleanOutcome::Done), ("git-worktree-remove", CleanOutcome::Failed)]
+        [("git-worktree-remove", CleanOutcome::Failed), ("trash", CleanOutcome::Failed)]
     );
+}
+
+#[test]
+fn guard_allows_a_worktree_git_file_but_not_a_git_directory() {
+    let fx = fixture();
+    let (repo, wt_path) = repo_with_worktree(&fx.home);
+    assert!(wt_path.join(".git").is_file());
+    assert!(guard::check_target(&wt_path, &fx.home).is_ok(), "a worktree's .git file is a pointer, not a repo");
+    let err = guard::check_target(&repo, &fx.home).unwrap_err().to_string();
+    assert!(err.contains("contains a git repository"), "{err}");
+
+    // A worktree that holds a repository of its own (a .git directory) is refused in both modes.
+    let nested = wt_path.join("vendor/lib");
+    fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "-q"]);
+    let wt = worktree_finding(&repo, &wt_path, 50);
+    let rep = report(vec![wt.clone()]);
+    for mode in [CleanMode::Trash, CleanMode::Delete] {
+        let res = run(&fx.env, &rep, &req(&[&wt], mode, false), None);
+        assert_failed!(item(&res, &wt));
+        assert!(msg(item(&res, &wt)).contains("contains a git repository"), "{}", msg(item(&res, &wt)));
+    }
+    assert!(nested.join(".git").is_dir() && wt_path.join("README").exists());
+    assert_eq!(fs::read_dir(fx.trash()).unwrap().count(), 0);
+
+    // A finding that points at a full clone (its .git is a directory) is never trashed either.
+    let clone = fx.home.join("Developer/clone");
+    fs::create_dir_all(&clone).unwrap();
+    git(&clone, &["init", "-q"]);
+    let fake = worktree_finding(&repo, &clone, 50);
+    let rep = report(vec![fake.clone()]);
+    let res = run(&fx.env, &rep, &req(&[&fake], CleanMode::Trash, false), None);
+    assert_failed!(item(&res, &fake));
+    assert!(clone.join(".git").is_dir());
 }
 
 #[test]
@@ -551,7 +668,8 @@ fn worktree_command_must_match_the_finding() {
 #[test]
 #[ignore = "modifies the real ~/.Trash"]
 fn trash_moves_item() {
-    let fx = fixture();
+    let mut fx = fixture();
+    fx.env.trash = Box::new(move_to_trash);
     let c = finding("cache.test", Some(&fx.home.join("Library/Caches/c.bin")), 100, ActionKind::Delete);
     let rep = report(vec![c.clone()]);
     let res = run(&fx.env, &rep, &req(&[&c], CleanMode::Trash, false), None);

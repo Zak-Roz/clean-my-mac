@@ -3,11 +3,14 @@ import fixture from "../../../../fixtures/sample-report.json";
 import type { Finding } from "../bindings/Finding";
 import type { ScanReport } from "../bindings/ScanReport";
 import {
+  actionDescription,
   dedupedTotal,
   defaultSelection,
+  doneDescription,
   groupFindings,
   isBulkSelectable,
   isInside,
+  isPermanentAction,
   isSelectable,
   matchesQuery,
 } from "./findings";
@@ -136,5 +139,22 @@ describe("format", () => {
   it("shortens the home directory", () => {
     expect(tildify("/Users/you/Library/Caches/Yarn")).toBe("~/Library/Caches/Yarn");
     expect(tildify("/Library/Caches")).toBe("/Library/Caches");
+  });
+});
+
+describe("worktree actions follow the clean mode", () => {
+  const wt = finding({ path: "/r/.claude/worktrees/w1", action: "git-worktree-remove" });
+  const prune = finding({ label: "prune", action: "command", command: ["git", "-C", "/r", "worktree", "prune"] });
+
+  it("describes Trash and Delete differently", () => {
+    expect(actionDescription(wt, "trash")).toBe("Move to Trash, then git worktree prune");
+    expect(actionDescription(wt, "delete")).toBe("git worktree remove (permanent)");
+    expect(doneDescription(wt, "trash")).toBe("Moved to Trash and pruned from git");
+    expect(doneDescription(wt, "delete")).toBe("Removed with git worktree remove");
+  });
+
+  it("only commands free space whatever the mode", () => {
+    expect(isPermanentAction(wt)).toBe(false);
+    expect(isPermanentAction(prune)).toBe(true);
   });
 });

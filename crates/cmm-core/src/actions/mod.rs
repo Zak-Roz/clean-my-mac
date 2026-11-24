@@ -4,6 +4,11 @@
 //! every item against the live system right before acting on it: the path still exists and passes
 //! the guard, the rule still matches, `requires_quit` processes are not running (fresh snapshot),
 //! and a git worktree is still clean (fresh `git status`). One failing item never stops the rest.
+//!
+//! Git worktrees follow the clean mode (contract v2): `Trash` moves the (guard-checked) worktree
+//! folder to the Trash and then runs `git -C <repo> worktree prune`, so ignored files such as
+//! `.env` stay recoverable; `Delete` runs the finding's `git … worktree remove <path>` argv (never
+//! `--force`). The branch and its commits stay in the repository either way.
 
 mod command;
 
@@ -50,7 +55,13 @@ pub struct ExecuteEnv {
     pub extra_protected: Vec<PathBuf>,
     /// Captures a fresh process snapshot (called right before each item that has `requires_quit`).
     pub processes: Box<dyn Fn() -> ProcessSnapshot + Send + Sync>,
+    /// Moves a guard-checked path to the Trash ([`move_to_trash`] in [`ExecuteEnv::system`]; tests
+    /// inject a fake so they never touch the real `~/.Trash`).
+    pub trash: Box<TrashFn>,
 }
+
+/// Signature of [`ExecuteEnv::trash`]: move one path to the Trash, or say why not.
+pub type TrashFn = dyn Fn(&Path) -> Result<(), String> + Send + Sync;
 
 impl ExecuteEnv {
     /// Real home, catalog from `Config::load()`'s `data_dir`, live process list. If the catalog
@@ -63,6 +74,7 @@ impl ExecuteEnv {
             rules,
             extra_protected: vec![config.data_dir],
             processes: Box::new(ProcessSnapshot::capture),
+            trash: Box::new(move_to_trash),
         }
     }
 }
@@ -87,7 +99,11 @@ pub fn plan(report: &ScanReport, req: &CleanRequest) -> Result<CleanPlan, CoreEr
     let bytes_where = |pred: &dyn Fn(&Finding) -> bool| -> (usize, u64) {
         sel.act.iter().filter(|f| pred(f)).fold((0, 0), |(n, b), f| (n + 1, b + f.bytes))
     };
-    let (n_paths, path_bytes) = bytes_where(&|f| matches!(f.action, ActionKind::Trash | ActionKind::Delete));
+    let in_trash_mode = req.mode == CleanMode::Trash;
+    let (n_paths, path_bytes) = bytes_where(&|f| {
+        matches!(f.action, ActionKind::Trash | ActionKind::Delete)
+            || (in_trash_mode && f.action == ActionKind::GitWorktreeRemove)
+    });
     if n_paths > 0 {
         warnings.push(match req.mode {
             CleanMode::Trash => format!(
@@ -101,11 +117,18 @@ pub fn plan(report: &ScanReport, req: &CleanRequest) -> Result<CleanPlan, CoreEr
     }
     let (n_wt, wt_bytes) = bytes_where(&|f| f.action == ActionKind::GitWorktreeRemove);
     if n_wt > 0 {
-        warnings.push(format!(
-            "{n_wt} git worktree(s) ({}) are removed with `git worktree remove`: permanent, not via Trash. \
-             Committed work stays in the repository; ignored files (.env, node_modules, …) are deleted.",
-            human(wt_bytes)
-        ));
+        warnings.push(match req.mode {
+            CleanMode::Trash => format!(
+                "{n_wt} git worktree folder(s) ({}) go to the Trash, then `git worktree prune` forgets them. \
+                 The branches and their commits stay in the repository.",
+                human(wt_bytes)
+            ),
+            CleanMode::Delete => format!(
+                "{n_wt} git worktree(s) ({}) are removed with `git worktree remove`: permanent. \
+                 Committed work stays in the repository; ignored files (.env, node_modules, …) are deleted.",
+                human(wt_bytes)
+            ),
+        });
     }
     for f in sel.act.iter().filter(|f| f.action == ActionKind::Command) {
         warnings.push(format!(
@@ -173,7 +196,7 @@ pub fn execute_with(
         let mut item = match act(env, f, req, &protected) {
             Ok(done) => {
                 match done.op {
-                    Op::Trash => result.moved_to_trash_bytes += f.bytes,
+                    Op::Trash | Op::WorktreeTrash => result.moved_to_trash_bytes += f.bytes,
                     Op::Delete | Op::GitWorktreeRemove | Op::Command => result.freed_bytes += f.bytes,
                 }
                 CleanItemResult {
@@ -323,6 +346,9 @@ fn select<'a>(report: &'a ScanReport, ids: &[String]) -> Selection<'a> {
 enum Op {
     Trash,
     Delete,
+    /// Worktree folder to the Trash, then `git worktree prune`.
+    WorktreeTrash,
+    /// The finding's `git … worktree remove <path>` argv.
     GitWorktreeRemove,
     Command,
 }
@@ -332,12 +358,14 @@ struct Done {
     message: String,
 }
 
-/// `Trash`/`Delete` findings follow the clean mode (Trash mode never deletes permanently).
+/// `Trash`/`Delete` and worktree findings follow the clean mode (Trash mode never deletes
+/// permanently); `Command` findings are what they are.
 fn op_for(action: ActionKind, mode: CleanMode) -> Option<Op> {
     match (action, mode) {
         (ActionKind::Trash | ActionKind::Delete, CleanMode::Trash) => Some(Op::Trash),
         (ActionKind::Trash | ActionKind::Delete, CleanMode::Delete) => Some(Op::Delete),
-        (ActionKind::GitWorktreeRemove, _) => Some(Op::GitWorktreeRemove),
+        (ActionKind::GitWorktreeRemove, CleanMode::Trash) => Some(Op::WorktreeTrash),
+        (ActionKind::GitWorktreeRemove, CleanMode::Delete) => Some(Op::GitWorktreeRemove),
         (ActionKind::Command, _) => Some(Op::Command),
         (ActionKind::InfoOnly, _) => None,
     }
@@ -348,7 +376,7 @@ fn act(env: &ExecuteEnv, f: &Finding, req: &CleanRequest, protected: &[PathBuf])
 
     // Path still exists and passes the guard (Command findings: the tool does the removal).
     let target = match op {
-        Op::Trash | Op::Delete | Op::GitWorktreeRemove => {
+        Op::Trash | Op::Delete | Op::WorktreeTrash | Op::GitWorktreeRemove => {
             let path = f.path.as_deref().ok_or("finding has no path")?;
             Some(guard::check_target_with(Path::new(path), &env.home, protected).map_err(|e| match e {
                 CoreError::NotFound(_) => "no longer exists".to_string(),
@@ -387,7 +415,7 @@ fn act(env: &ExecuteEnv, f: &Finding, req: &CleanRequest, protected: &[PathBuf])
             if dry {
                 return Ok(Done { op, message: "dry run: would move to Trash".into() });
             }
-            move_to_trash(&target)?;
+            (env.trash)(&target)?;
             Ok(Done { op, message: "moved to Trash".into() })
         }
         (Op::Delete, Some(target)) => {
@@ -396,6 +424,28 @@ fn act(env: &ExecuteEnv, f: &Finding, req: &CleanRequest, protected: &[PathBuf])
             }
             delete_permanently(&target).map_err(|e| format!("delete failed: {e}"))?;
             Ok(Done { op, message: "deleted permanently".into() })
+        }
+        (Op::WorktreeTrash, Some(target)) => {
+            let argv = f.command.as_deref().unwrap_or_default();
+            let repo = check_worktree_argv(argv, &target)?;
+            ensure_linked_worktree(&target)?;
+            let git = command::resolve_allowed(&argv[0])?;
+            ensure_worktree_clean(&git, &target)?;
+            let prune: Vec<String> = vec!["git".into(), "-C".into(), repo.into(), "worktree".into(), "prune".into()];
+            if dry {
+                return Ok(Done {
+                    op,
+                    message: format!("dry run: would move to Trash, then run `{}`", command::display_argv(&prune)),
+                });
+            }
+            (env.trash)(&target)?;
+            // The folder is already in the Trash: a failed prune only leaves a stale entry that the
+            // next scan offers as a `git worktree prune` finding.
+            let message = match run_checked(&git, &prune, GIT_STATUS_TIMEOUT) {
+                Ok(_) => format!("moved to Trash; ran `{}`", command::display_argv(&prune)),
+                Err(e) => format!("moved to Trash; {e}"),
+            };
+            Ok(Done { op, message })
         }
         (Op::GitWorktreeRemove, Some(target)) => {
             let argv = f.command.as_deref().unwrap_or_default();
@@ -436,20 +486,30 @@ fn check_rule_roots(rule: &RuleDef, target: &Path, home: &Path) -> Result<(), St
     if inside { Ok(()) } else { Err(format!("no longer matches rule {} (outside its roots)", rule.id)) }
 }
 
-/// `["git", "-C", <repo>, "worktree", "remove", <worktree path>]` and the path is the finding's.
-fn check_worktree_argv(argv: &[String], target: &Path) -> Result<(), String> {
+/// `["git", "-C", <repo>, "worktree", "remove", <worktree path>]` (no `--force` or other flags) and
+/// the path is the finding's. Returns `<repo>`.
+fn check_worktree_argv<'a>(argv: &'a [String], target: &Path) -> Result<&'a str, String> {
     match argv {
         [git, c, repo, wt, rm, path]
             if git == "git" && c == "-C" && wt == "worktree" && rm == "remove" && Path::new(repo).is_absolute() =>
         {
             let resolved = canonical_entry(Path::new(path)).ok_or_else(|| format!("cannot resolve {path}"))?;
             if same_path(&resolved, target) {
-                Ok(())
+                Ok(repo)
             } else {
                 Err(format!("worktree command targets {path}, not the finding's path"))
             }
         }
         _ => Err(format!("unexpected worktree command `{}`", command::display_argv(argv))),
+    }
+}
+
+/// A linked worktree has a `.git` **file** (gitdir pointer); a `.git` directory would be a
+/// repository of its own (and the guard refuses it anyway).
+fn ensure_linked_worktree(target: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(target.join(".git")) {
+        Ok(m) if m.is_file() => Ok(()),
+        _ => Err("not a linked git worktree (no .git file)".into()),
     }
 }
 
@@ -487,7 +547,7 @@ fn run_checked(program: &Path, argv: &[String], timeout: Duration) -> Result<com
 
 /// NSFileManager `trashItemAtURL` (the `trash` crate's default on macOS is a Finder AppleScript,
 /// which needs Automation permission). The final symlink, if any, is trashed as a link.
-fn move_to_trash(target: &Path) -> Result<(), String> {
+pub fn move_to_trash(target: &Path) -> Result<(), String> {
     #[allow(unused_mut)]
     let mut ctx = trash::TrashContext::default();
     #[cfg(target_os = "macos")]

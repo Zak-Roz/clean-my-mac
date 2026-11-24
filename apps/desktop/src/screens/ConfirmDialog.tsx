@@ -219,7 +219,7 @@ function PlanItem({
   );
 }
 
-/** Core warnings plus the note that tool-removed items (git worktree, docker, xcrun) are permanent. */
+/** Core warnings plus the note that command items (docker, xcrun, git worktree prune) are permanent. */
 function PlanNotes({ plan }: { plan: CleanPlan }) {
   const permanent = plan.items.filter(isPermanentAction);
   const one = permanent.length === 1;
@@ -227,7 +227,7 @@ function PlanNotes({ plan }: { plan: CleanPlan }) {
     ...plan.warnings,
     ...(permanent.length > 0
       ? [
-          `${formatCount(permanent.length, "item")} ${one ? "is" : "are"} removed by ${one ? "its" : "their"} own tool (git worktree remove, docker, xcrun) and ${one ? "frees" : "free"} space right away, whichever option you pick.`,
+          `${formatCount(permanent.length, "item")} ${one ? "runs its" : "run their"} own tool (docker, xcrun, git worktree prune) and ${one ? "frees" : "free"} space right away, whichever option you pick.`,
         ]
       : []),
   ];
