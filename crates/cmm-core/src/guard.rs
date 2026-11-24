@@ -41,6 +41,26 @@ pub fn check_target(path: &Path, home: &Path) -> Result<PathBuf, CoreError> {
 
 /// [`check_target`] with additional protected absolute paths (e.g. a non-default `data_dir`).
 pub fn check_target_with(path: &Path, home: &Path, extra_protected: &[PathBuf]) -> Result<PathBuf, CoreError> {
+    check(path, home, extra_protected, GitEntries::None)
+}
+
+/// [`check_target_with`] for a linked git worktree (a `git-worktree-remove` finding): its own
+/// top-level `.git` **file** (the gitdir pointer) is expected; any other `.git` entry inside it
+/// (a nested repository, a submodule's `.git` file) is still refused.
+pub fn check_worktree_target_with(path: &Path, home: &Path, extra_protected: &[PathBuf]) -> Result<PathBuf, CoreError> {
+    check(path, home, extra_protected, GitEntries::OwnWorktreeFile)
+}
+
+/// Which `.git` entries a target may contain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitEntries {
+    /// None at all (safety fix 2): a `.git` file or directory anywhere inside means a checkout.
+    None,
+    /// Only the target's own top-level `.git` regular file (a linked worktree).
+    OwnWorktreeFile,
+}
+
+fn check(path: &Path, home: &Path, extra_protected: &[PathBuf], allowed: GitEntries) -> Result<PathBuf, CoreError> {
     let refuse = |why: &str| CoreError::Guard(format!("{}: {why}", path.display()));
 
     if !path.is_absolute() {
@@ -53,7 +73,7 @@ pub fn check_target_with(path: &Path, home: &Path, extra_protected: &[PathBuf]) 
         return Err(refuse("does not name a file or directory"));
     };
     if eq_component(name, OsStr::new(".git")) {
-        return Err(refuse("is a .git directory"));
+        return Err(refuse("is a .git entry"));
     }
 
     let canonical_parent = match fs::canonicalize(parent) {
@@ -95,7 +115,7 @@ pub fn check_target_with(path: &Path, home: &Path, extra_protected: &[PathBuf]) 
     }
 
     if target_meta.is_dir() {
-        find_git_dir(&target).map_err(|why| refuse(&why))?;
+        find_git_entry(&target, allowed).map_err(|why| refuse(&why))?;
     }
     Ok(target)
 }
@@ -141,15 +161,25 @@ fn identity_ancestor(target_meta: &Metadata, protected: &Path) -> Option<PathBuf
     })
 }
 
-/// Errors if `dir` contains a `.git` directory anywhere below it (walk does not follow symlinks or
-/// cross devices). An unreadable subdirectory is also an error: we cannot prove it holds no repo.
-fn find_git_dir(dir: &Path) -> Result<(), String> {
+/// Errors if `dir` contains a `.git` entry (directory, file or link) anywhere below it, except what
+/// `allowed` permits (walk does not follow symlinks or cross devices). An unreadable subdirectory
+/// is also an error: we cannot prove it holds no repository.
+fn find_git_entry(dir: &Path, allowed: GitEntries) -> Result<(), String> {
     let walker = walkdir::WalkDir::new(dir).follow_links(false).same_file_system(true).min_depth(1);
     for entry in walker {
         let entry = entry.map_err(|e| format!("cannot inspect contents: {e}"))?;
-        if entry.file_type().is_dir() && eq_component(entry.file_name(), OsStr::new(".git")) {
-            return Err(format!("contains a git repository ({})", entry.path().display()));
+        if !eq_component(entry.file_name(), OsStr::new(".git")) {
+            continue;
         }
+        let own_pointer = entry.depth() == 1 && entry.file_type().is_file();
+        if allowed == GitEntries::OwnWorktreeFile && own_pointer {
+            continue;
+        }
+        return Err(if entry.file_type().is_dir() {
+            format!("contains a git repository ({})", entry.path().display())
+        } else {
+            format!("contains a .git file ({}): part of a git checkout", entry.path().display())
+        });
     }
     Ok(())
 }
@@ -343,11 +373,28 @@ mod tests {
         // Deep inside, too.
         fs::create_dir_all(home.join("Library/Caches/com.example/data/vendor/lib/.git")).unwrap();
         assert!(matches!(check(&home, "Library/Caches/com.example"), Err(CoreError::Guard(_))));
-        // A `.git` *file* (linked worktree) is not a repository directory.
+        // A `.git` *file* (linked worktree, submodule) also marks a checkout: refused by the plain
+        // check, allowed only as a worktree target's own top-level pointer.
         fs::write(home.join("Developer/proj2/.git"), "gitdir: /elsewhere").unwrap();
-        assert!(check(&home, "Developer/proj2").is_ok());
+        let r = check(&home, "Developer/proj2");
+        assert!(matches!(r, Err(CoreError::Guard(ref m)) if m.contains("contains a .git file")), "{r:?}");
+        assert!(check_worktree_target_with(&home.join("Developer/proj2"), &home, &[]).is_ok());
         // ...but the file itself is never a target.
         assert!(matches!(check(&home, "Developer/proj2/.git"), Err(CoreError::Guard(_))));
+        assert!(check_worktree_target_with(&home.join("Developer/proj2/.git"), &home, &[]).is_err());
+        // A nested `.git` file (a submodule inside the worktree) is refused even for worktrees.
+        fs::create_dir_all(home.join("Developer/proj2/lib")).unwrap();
+        fs::write(home.join("Developer/proj2/lib/.git"), "gitdir: ../.git/modules/lib").unwrap();
+        let r = check_worktree_target_with(&home.join("Developer/proj2"), &home, &[]);
+        assert!(matches!(r, Err(CoreError::Guard(ref m)) if m.contains("lib/.git")), "{r:?}");
+        // A worktree target whose top-level `.git` is a directory is a full clone: refused.
+        let r = check_worktree_target_with(&home.join("Developer/proj"), &home, &[]);
+        assert!(matches!(r, Err(CoreError::Guard(ref m)) if m.contains("git repository")), "{r:?}");
+        // A `.git` symlink is not a plain pointer file either.
+        fs::create_dir_all(home.join("Library/Caches/linked")).unwrap();
+        symlink(home.join("Developer/proj/.git"), home.join("Library/Caches/linked/.git")).unwrap();
+        assert!(check(&home, "Library/Caches/linked").is_err());
+        assert!(check_worktree_target_with(&home.join("Library/Caches/linked"), &home, &[]).is_err());
     }
 
     #[test]

@@ -1,9 +1,13 @@
 //! Allowlisted external commands (ARCHITECTURE.md §6.4). Programs are resolved and run by the
 //! shared helpers in [`crate::process`] (contract v2: one timed runner, one resolver).
+//!
+//! On top of the program allowlist, every argv must match one exact per-detector pattern
+//! (safety fix 6, [`check_argv`]); anything else is refused even when `argv[0]` is allowlisted.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use crate::model::{ActionKind, DetectorKind};
 use crate::process;
 
 /// The only programs a `Command` / `GitWorktreeRemove` action may run. Matched exactly against
@@ -17,6 +21,91 @@ pub(crate) fn check_allowed(program: &str) -> Result<(), String> {
     } else {
         Err(format!("`{program}` is not an allowed program (allowed: {})", COMMAND_ALLOWLIST.join(", ")))
     }
+}
+
+/// The exact command shapes the detectors produce (safety fix 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pattern {
+    /// `docker system prune -f`
+    DockerPrune,
+    /// `xcrun simctl delete unavailable`
+    SimctlDeleteUnavailable,
+    /// `xcrun simctl runtime delete <UUID>`
+    SimctlRuntimeDelete,
+    /// `git -C <abs repo> worktree prune`
+    GitWorktreePrune,
+    /// `git -C <abs repo> worktree remove <abs path>`
+    GitWorktreeRemove,
+}
+
+impl Pattern {
+    /// The detector that produces this command.
+    fn detector(self) -> DetectorKind {
+        match self {
+            Pattern::DockerPrune => DetectorKind::Docker,
+            Pattern::SimctlDeleteUnavailable | Pattern::SimctlRuntimeDelete => DetectorKind::SimulatorRuntimes,
+            Pattern::GitWorktreePrune | Pattern::GitWorktreeRemove => DetectorKind::GitWorktrees,
+        }
+    }
+
+    /// The finding action that carries this command.
+    fn action(self) -> ActionKind {
+        match self {
+            Pattern::GitWorktreeRemove => ActionKind::GitWorktreeRemove,
+            _ => ActionKind::Command,
+        }
+    }
+}
+
+/// Which exact pattern `argv` is, if any.
+pub(crate) fn classify(argv: &[String]) -> Option<Pattern> {
+    let a: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match a.as_slice() {
+        ["docker", "system", "prune", "-f"] => Some(Pattern::DockerPrune),
+        ["xcrun", "simctl", "delete", "unavailable"] => Some(Pattern::SimctlDeleteUnavailable),
+        ["xcrun", "simctl", "runtime", "delete", id] if is_uuid(id) => Some(Pattern::SimctlRuntimeDelete),
+        ["git", "-C", repo, "worktree", "prune"] if is_plain_absolute(repo) => Some(Pattern::GitWorktreePrune),
+        ["git", "-C", repo, "worktree", "remove", path] if is_plain_absolute(repo) && is_plain_absolute(path) => {
+            Some(Pattern::GitWorktreeRemove)
+        }
+        _ => None,
+    }
+}
+
+/// Program allowlist, then the exact pattern for `action` (and for `detector`, when the rule is
+/// known). Returns the matched pattern.
+pub(crate) fn check_argv(
+    argv: &[String],
+    action: ActionKind,
+    detector: Option<DetectorKind>,
+) -> Result<Pattern, String> {
+    let program = argv.first().ok_or("finding has no command")?;
+    check_allowed(program)?;
+    let refuse = || format!("command `{}` does not match an allowed pattern for this finding", display_argv(argv));
+    let pattern = classify(argv).ok_or_else(refuse)?;
+    if pattern.action() != action || detector.is_some_and(|d| d != pattern.detector()) {
+        return Err(refuse());
+    }
+    Ok(pattern)
+}
+
+/// `8-4-4-4-12` hex digits (simulator runtime identifiers).
+fn is_uuid(s: &str) -> bool {
+    let groups: Vec<&str> = s.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(g, len)| g.len() == len && g.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Absolute, without `.`/`..` components, no NUL, not just `/`.
+fn is_plain_absolute(s: &str) -> bool {
+    let p = Path::new(s);
+    p.is_absolute()
+        && !s.contains('\0')
+        && p.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
+        && p.components().count() > 1
 }
 
 /// Allowlist check, then the absolute path of the executable in [`process::TOOL_DIRS`]
@@ -78,6 +167,61 @@ mod tests {
         }
         assert!(resolve_allowed("rm").is_err());
         assert!(resolve_allowed("git").unwrap().is_absolute());
+    }
+
+    fn argv(s: &[&str]) -> Vec<String> {
+        s.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn only_exact_per_detector_patterns_are_accepted() {
+        use ActionKind::{Command, GitWorktreeRemove};
+        use DetectorKind::{Docker, GitWorktrees, Paths, SimulatorRuntimes};
+        let uuid = "0F5B7C2E-1D3A-4B6C-8E9F-A1B2C3D4E5F6";
+        let ok: &[(&[&str], ActionKind, DetectorKind)] = &[
+            (&["docker", "system", "prune", "-f"], Command, Docker),
+            (&["xcrun", "simctl", "delete", "unavailable"], Command, SimulatorRuntimes),
+            (&["xcrun", "simctl", "runtime", "delete", uuid], Command, SimulatorRuntimes),
+            (&["git", "-C", "/Users/x/repo", "worktree", "prune"], Command, GitWorktrees),
+            (
+                &["git", "-C", "/Users/x/repo", "worktree", "remove", "/Users/x/repo/wt"],
+                GitWorktreeRemove,
+                GitWorktrees,
+            ),
+        ];
+        for (a, action, detector) in ok {
+            assert!(check_argv(&argv(a), *action, Some(*detector)).is_ok(), "{a:?}");
+            assert!(check_argv(&argv(a), *action, None).is_ok(), "{a:?} without a rule");
+            assert!(check_argv(&argv(a), *action, Some(Paths)).is_err(), "{a:?} from another detector");
+        }
+        let bad: &[&[&str]] = &[
+            &["git", "--version"],
+            &["git", "gc"],
+            &["docker", "system", "prune", "-a", "-f"],
+            &["docker", "system", "prune", "-f", "--volumes"],
+            &["docker", "volume", "prune", "-f"],
+            &["xcrun", "simctl", "erase", "all"],
+            &["xcrun", "simctl", "runtime", "delete", "all"],
+            &["xcrun", "simctl", "runtime", "delete", "1234"],
+            &["git", "-C", "relative/repo", "worktree", "prune"],
+            &["git", "-C", "/Users/x/../y", "worktree", "prune"],
+            &["git", "-C", "/", "worktree", "prune"],
+            &["git", "-C", "/r", "worktree", "remove", "--force", "/r/wt"],
+            &["git", "-C", "/r", "worktree", "remove", "wt"],
+            &["git", "-C", "/r", "clean", "-fdx", "/r/wt"],
+            &["rm", "-rf", "/"],
+            &[],
+        ];
+        for a in bad {
+            for action in [Command, GitWorktreeRemove] {
+                assert!(check_argv(&argv(a), action, None).is_err(), "{a:?} must be refused");
+            }
+        }
+        // The action must fit the pattern too.
+        assert!(check_argv(&argv(&["git", "-C", "/r", "worktree", "prune"]), GitWorktreeRemove, None).is_err());
+        assert!(check_argv(&argv(&["git", "-C", "/r", "worktree", "remove", "/r/w"]), Command, None).is_err());
+        assert!(check_argv(&argv(&["git", "--version"]), Command, None).unwrap_err().contains("allowed pattern"));
+        assert!(check_argv(&argv(&["rm"]), Command, None).unwrap_err().contains("not an allowed program"));
     }
 
     #[test]

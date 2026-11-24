@@ -5,6 +5,11 @@
 //! full scan and after a real clean prunes it, loaded at startup; a missing or unreadable file just
 //! means "no scan yet".
 //!
+//! The stored report is for display and selection only (safety fix 1): `plan_clean` and
+//! `execute_clean` re-scan the rules of the selected findings and act only on findings that are
+//! still exactly what the user picked (`actions::plan_fresh` / `actions::execute_fresh`). A real
+//! clean is refused when the history database (audit log) cannot be opened (safety fix 5).
+//!
 //! Everything that touches the disk or SQLite runs on a blocking thread so the webview never stalls.
 //! Core functions that are still skeleton stubs surface as `"not implemented: …"` errors, which the
 //! UI shows as "not available in this build yet" instead of failing.
@@ -136,6 +141,11 @@ fn core_err(e: CoreError) -> String {
     e.to_string()
 }
 
+/// The error a real clean returns when the history database (audit log) cannot be opened.
+fn refuse_without_history(e: &str) -> String {
+    format!("Nothing was cleaned: the audit log can't be written ({e}). Every removal is recorded there first.")
+}
+
 fn join_err(e: tauri::Error) -> String {
     format!("background task failed: {e}")
 }
@@ -212,12 +222,15 @@ pub async fn last_report(state: State<'_, AppState>) -> Result<Option<ScanReport
     state.last_report_clone()
 }
 
+/// Plans against a fresh scan of the selected findings' rules (it shows what would really happen;
+/// whatever changed since the stored scan is listed as "no longer matches the scan").
 #[tauri::command]
 pub async fn plan_clean(app: AppHandle, req: CleanRequest) -> Result<CleanPlan, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let report = state.last_report_clone()?.ok_or("No scan yet — run a scan first")?;
-        actions::plan(&report, &req).map_err(core_err)
+        let rules = state.load_rules()?;
+        actions::plan_fresh(&rules, &report, &req, &state.config, &home_dir()).map_err(core_err)
     })
     .await
     .map_err(join_err)?
@@ -229,17 +242,22 @@ pub async fn execute_clean(app: AppHandle, req: CleanRequest) -> Result<CleanRes
         let state = app.state::<AppState>();
         let _busy = BusyGuard::acquire(&state.cleaning, "a clean")?;
         let report = state.last_report_clone()?.ok_or("No scan yet — run a scan first")?;
+        let rules = state.load_rules()?;
+        let home = home_dir();
         let emit = |item: &CleanItemResult| {
             let _ = app.emit(CLEAN_ITEM_EVENT, item);
         };
-        // The audit log (§6.6) is written by `execute` when history is available. Without it the
-        // clean still runs, exactly like `cmm clean` does.
-        let result = match state.with_history(|h| Ok(actions::execute(&report, &req, Some(h), &emit))) {
+        let run = |history: Option<&History>| {
+            actions::execute_fresh(&rules, &report, &req, &state.config, &home, history, &emit)
+        };
+        // Every executed action goes to the audit log (§6.6): a real clean without it is refused.
+        let result = match state.with_history(|h| Ok(run(Some(h)))) {
             Ok(result) => result,
-            Err(e) => {
-                eprintln!("cmm: cleaning without history: {e}");
-                actions::execute(&report, &req, None, &emit)
+            Err(e) if req.dry_run => {
+                eprintln!("cmm: dry run without history: {e}");
+                run(None)
             }
+            Err(e) => return Err(refuse_without_history(&e)),
         };
         if let Some(stored) = state.last_report.lock().map_err(|e| e.to_string())?.as_mut()
             && !result.dry_run
@@ -381,6 +399,19 @@ mod tests {
             std::fs::write(&path, corrupt).unwrap();
             assert!(AppState::new(config.clone()).last_report_clone().unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn real_clean_is_refused_when_history_cannot_open() {
+        let dir = tempfile::tempdir().unwrap();
+        // `data_dir` is a file: the history database can never be created inside it.
+        let data_dir = dir.path().join("data");
+        std::fs::write(&data_dir, "not a directory").unwrap();
+        let state = AppState::new(Config { data_dir, ..Config::default() });
+        let err = state.with_history(|_| Ok(())).unwrap_err();
+        assert!(err.contains("history unavailable"), "{err}");
+        let msg = refuse_without_history(&err);
+        assert!(msg.starts_with("Nothing was cleaned: the audit log can't be written"), "{msg}");
     }
 
     #[test]

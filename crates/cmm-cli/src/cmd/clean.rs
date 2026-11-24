@@ -1,8 +1,10 @@
 //! `cmm clean (--id … | --rule … | --safe) [--delete] [--yes]` (owned by S3).
 //!
-//! Re-scans only the rules involved (never acts on stale data), plans, prints the plan, then runs
-//! the executor: as a dry run unless `--yes`. With `--yes` the history database must open, because
-//! every executed action goes to its audit log.
+//! Scans only the rules involved, plans and prints the plan, then runs the executor: as a dry run
+//! unless `--yes`. The executor is [`actions::execute_fresh`]: it scans those rules once more and
+//! acts only on findings that are still exactly what the plan showed (safety fix 1), so nothing is
+//! ever done on stale data. With `--yes` the history database must open, because every executed
+//! action goes to its audit log (safety fix 5).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -85,7 +87,10 @@ pub fn run(args: Args) -> Result<ExitCode> {
     let req = CleanRequest { finding_ids: plan.items.iter().map(|f| f.id.clone()).collect(), mode, dry_run };
     let by_id: HashMap<&str, &Finding> = report.findings.iter().map(|f| (f.id.as_str(), f)).collect();
     println!();
-    let result = actions::execute(&report, &req, history.as_ref(), &|item| print_item(item, &by_id, &home));
+    eprintln!("Re-checking {} item(s) against a fresh scan…", req.finding_ids.len());
+    let result = actions::execute_fresh(&catalog, &report, &req, &config, &home, history.as_ref(), &|item| {
+        print_item(item, &by_id, &home)
+    });
     print_summary(&result);
     let failed = result.items.iter().any(|i| i.outcome == CleanOutcome::Failed);
     Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })

@@ -1,18 +1,27 @@
-//! Clean planning and execution (owned by S3). See ARCHITECTURE.md §6.
+//! Clean planning and execution (owned by S3). See ARCHITECTURE.md §6 and §10 ("Safety fixes
+//! after the delete-path review").
 //!
-//! [`plan`] is pure (report + request → what would happen). [`execute`] re-plans, then re-validates
-//! every item against the live system right before acting on it: the path still exists and passes
-//! the guard, the rule still matches, `requires_quit` processes are not running (fresh snapshot),
-//! and a git worktree is still clean (fresh `git status`). One failing item never stops the rest.
+//! **Never act on a stored report.** [`execute_fresh`] re-runs the scan for the rules of the
+//! requested findings and acts only on findings that are still there with the same id, action,
+//! path and command argv, and without blockers; everything else is `Skipped` ("no longer matches
+//! the scan"). [`plan_fresh`] does the same for the confirmation step. The stored report (the
+//! app's `last-report.json`, the CLI's first scan) only says which findings the user picked.
 //!
-//! Git worktrees follow the clean mode (contract v2): `Trash` moves the (guard-checked) worktree
-//! folder to the Trash and then runs `git -C <repo> worktree prune`, so ignored files such as
-//! `.env` stay recoverable; `Delete` runs the finding's `git … worktree remove <path>` argv (never
-//! `--force`). The branch and its commits stay in the repository either way.
+//! The executor then re-validates every item right before acting on it: the path still exists and
+//! passes the guard (no `.git` entry inside, except a worktree's own pointer file), the rule still
+//! matches, `requires_quit` processes are not running (fresh snapshot), a command matches its exact
+//! per-detector pattern, and a git worktree is still clean, unlocked, has no commits missing from
+//! the remotes and no submodules. One failing item never stops the rest. A real (non-dry-run)
+//! clean requires the history database: every acted-on item goes to its audit log.
+//!
+//! Git worktrees follow the clean mode: `Trash` moves the worktree folder **and** its own admin
+//! dir (`<repo>/.git/worktrees/<id>`) to the Trash, so restoring both restores the worktree; there
+//! is no repository-wide `git worktree prune`. `Delete` runs the finding's
+//! `git -C <repo> worktree remove <path>` (never `--force`). The branch stays in the repository.
 
 mod command;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -21,19 +30,26 @@ use ts_rs::TS;
 
 pub use command::COMMAND_ALLOWLIST;
 
-use crate::config::{Config, home_dir};
+use crate::config::Config;
 use crate::error::CoreError;
 use crate::guard::{self, canonical_entry, is_within, same_path};
 use crate::history::History;
 use crate::model::{
-    ActionKind, CleanItemResult, CleanMode, CleanOutcome, CleanRequest, CleanResult, Finding, RuleDef, ScanReport,
+    ActionKind, CleanItemResult, CleanMode, CleanOutcome, CleanRequest, CleanResult, DetectorKind, Finding, RuleDef,
+    ScanOptions, ScanReport,
 };
 use crate::process::ProcessSnapshot;
-use crate::rules::{expand_roots, load_rules};
+use crate::rules::expand_roots;
+use crate::scan::scan_with;
 
 const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(20);
 const GIT_REMOVE_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Prefix of the reason for findings that a fresh scan no longer confirms.
+pub const NO_LONGER_MATCHES: &str = "no longer matches the scan";
+/// Item message when a real clean is refused because there is no audit log.
+pub const NO_AUDIT_LOG: &str = "refusing to clean without the audit log: the history database is not open";
 
 /// What `execute` would do for a request. Returned to the desktop app by `plan_clean`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -45,17 +61,19 @@ pub struct CleanPlan {
     pub warnings: Vec<String>,
 }
 
-/// Live-system dependencies of [`execute_with`]. [`execute`] uses [`ExecuteEnv::system`]; tests
-/// point `home` at a tempdir and inject rules and a process snapshot.
+/// Live-system dependencies of the executor. [`execute_fresh`] / [`plan_fresh`] use
+/// [`ExecuteEnv::live`]; tests point `home` at a tempdir and inject rules, a process snapshot and
+/// a fake Trash.
 pub struct ExecuteEnv {
     pub home: PathBuf,
-    /// The current catalog, for "rule still matches" and `requires_quit`.
+    /// The current catalog: what the fresh scan runs, "rule still matches" and `requires_quit`.
     pub rules: Vec<RuleDef>,
     /// Extra paths the guard must protect (the app's `data_dir`).
     pub extra_protected: Vec<PathBuf>,
-    /// Captures a fresh process snapshot (called right before each item that has `requires_quit`).
+    /// Captures a fresh process snapshot (for the fresh scan and right before each item that has
+    /// `requires_quit`).
     pub processes: Box<dyn Fn() -> ProcessSnapshot + Send + Sync>,
-    /// Moves a guard-checked path to the Trash ([`move_to_trash`] in [`ExecuteEnv::system`]; tests
+    /// Moves a guard-checked path to the Trash ([`move_to_trash`] in [`ExecuteEnv::live`]; tests
     /// inject a fake so they never touch the real `~/.Trash`).
     pub trash: Box<TrashFn>,
 }
@@ -64,25 +82,230 @@ pub struct ExecuteEnv {
 pub type TrashFn = dyn Fn(&Path) -> Result<(), String> + Send + Sync;
 
 impl ExecuteEnv {
-    /// Real home, catalog from `Config::load()`'s `data_dir`, live process list. If the catalog
-    /// cannot be loaded, `rules` is empty and every item fails re-validation (fail closed).
-    pub fn system() -> Self {
-        let config = Config::load();
-        let rules = load_rules(Some(&config.data_dir.join("rules.d"))).unwrap_or_default();
+    /// The real system: `rules` as given, `config.data_dir` protected, live process list, the
+    /// real Trash (NSFileManager).
+    pub fn live(rules: &[RuleDef], config: &Config, home: &Path) -> Self {
         Self {
-            home: home_dir(),
-            rules,
-            extra_protected: vec![config.data_dir],
+            home: home.to_path_buf(),
+            rules: rules.to_vec(),
+            extra_protected: vec![config.data_dir.clone()],
             processes: Box::new(ProcessSnapshot::capture),
             trash: Box::new(move_to_trash),
         }
     }
 }
 
-/// Resolves `req.finding_ids` against the report. Unknown ids are an error; info-only, blocked,
-/// malformed and covered-by-parent findings are excluded with a warning.
+// ---------------------------------------------------------------------------------------------
+// Fresh scan: never act on a stored report (safety fix 1)
+
+/// Plans `req` against a **fresh** scan of the rules behind the requested findings (see the module
+/// docs). `selected_from` is the report the user picked the ids from; an id that is not in it is
+/// an error. Findings that no longer match are left out of `items` with a "Skipped …: no longer
+/// matches the scan (…)" warning.
+pub fn plan_fresh(
+    rules: &[RuleDef],
+    selected_from: &ScanReport,
+    req: &CleanRequest,
+    config: &Config,
+    home: &Path,
+) -> Result<CleanPlan, CoreError> {
+    plan_fresh_with(&ExecuteEnv::live(rules, config, home), config, selected_from, req)
+}
+
+/// [`plan_fresh`] with explicit live-system dependencies.
+pub fn plan_fresh_with(
+    env: &ExecuteEnv,
+    config: &Config,
+    selected_from: &ScanReport,
+    req: &CleanRequest,
+) -> Result<CleanPlan, CoreError> {
+    let known: HashSet<&str> = selected_from.findings.iter().map(|f| f.id.as_str()).collect();
+    let unknown: Vec<&str> = req.finding_ids.iter().map(String::as_str).filter(|id| !known.contains(id)).collect();
+    if !unknown.is_empty() {
+        return Err(CoreError::NotFound(format!("unknown finding id(s): {}", unknown.join(", "))));
+    }
+    let fresh = rescan(env, config, selected_from, &req.finding_ids);
+    let current = CleanRequest { finding_ids: fresh.current.clone(), mode: req.mode, dry_run: req.dry_run };
+    let mut plan = plan_with(&fresh.report, &current, Some(&env.rules))?;
+    let mut warnings: Vec<String> = fresh
+        .stale
+        .iter()
+        .map(|s| format!("Skipped {}: {NO_LONGER_MATCHES} ({})", label_of(s.stored.as_ref()), s.why))
+        .collect();
+    warnings.append(&mut plan.warnings);
+    plan.warnings = warnings;
+    Ok(plan)
+}
+
+/// Re-scans, re-validates and executes `req` against the real system (safety fix 1): only findings
+/// that a fresh scan still reports with the same id, action, path and argv, and without blockers,
+/// are acted on; the rest are `Skipped` ("no longer matches the scan (…)"). `selected_from` is the
+/// report the user picked the ids from (for display and selection only).
+///
+/// A real clean (`dry_run == false`) without `history` is refused: every item is `Skipped` with
+/// [`NO_AUDIT_LOG`] and nothing is scanned or changed (safety fix 5).
+pub fn execute_fresh(
+    rules: &[RuleDef],
+    selected_from: &ScanReport,
+    req: &CleanRequest,
+    config: &Config,
+    home: &Path,
+    history: Option<&History>,
+    on_item: &dyn Fn(&CleanItemResult),
+) -> CleanResult {
+    execute_fresh_with(&ExecuteEnv::live(rules, config, home), config, selected_from, req, history, on_item)
+}
+
+/// [`execute_fresh`] with explicit live-system dependencies.
+///
+/// Result items: first the findings the fresh scan no longer confirms (`Skipped`), then what the
+/// executor reports for the rest (see [`execute_with`]).
+pub fn execute_fresh_with(
+    env: &ExecuteEnv,
+    config: &Config,
+    selected_from: &ScanReport,
+    req: &CleanRequest,
+    history: Option<&History>,
+    on_item: &dyn Fn(&CleanItemResult),
+) -> CleanResult {
+    let mut result =
+        CleanResult { dry_run: req.dry_run, mode: req.mode, items: vec![], freed_bytes: 0, moved_to_trash_bytes: 0 };
+    let skip = |id: &str, message: String, result: &mut CleanResult| {
+        let item = CleanItemResult {
+            finding_id: id.to_string(),
+            outcome: CleanOutcome::Skipped,
+            bytes: 0,
+            message: Some(message),
+        };
+        on_item(&item);
+        result.items.push(item);
+    };
+
+    if !req.dry_run && history.is_none() {
+        for id in dedup(&req.finding_ids) {
+            skip(id, format!("skipped: {NO_AUDIT_LOG}"), &mut result);
+        }
+        return result;
+    }
+
+    let fresh = rescan(env, config, selected_from, &req.finding_ids);
+    for s in &fresh.stale {
+        let reason = match s.stored {
+            Some(_) => format!("{NO_LONGER_MATCHES} ({})", s.why),
+            None => s.why.clone(),
+        };
+        skip(&s.id, format!("skipped: {reason}"), &mut result);
+    }
+    let current = CleanRequest { finding_ids: fresh.current, mode: req.mode, dry_run: req.dry_run };
+    let done = execute_with(env, &fresh.report, &current, history, on_item);
+    result.items.extend(done.items);
+    result.freed_bytes += done.freed_bytes;
+    result.moved_to_trash_bytes += done.moved_to_trash_bytes;
+    result
+}
+
+/// A requested id the fresh scan does not confirm.
+struct Stale {
+    id: String,
+    /// The finding as the user saw it (`None`: not in the stored report).
+    stored: Option<Finding>,
+    why: String,
+}
+
+struct Rescan {
+    /// The fresh scan of the requested findings' rules.
+    report: ScanReport,
+    /// Requested ids confirmed by the fresh scan, in request order (deduplicated).
+    current: Vec<String>,
+    stale: Vec<Stale>,
+}
+
+fn dedup(ids: &[String]) -> Vec<&str> {
+    let mut seen = HashSet::new();
+    ids.iter().map(String::as_str).filter(|id| seen.insert(*id)).collect()
+}
+
+/// Scans the rules behind `ids` (as found in `selected_from`) and splits `ids` into confirmed and
+/// stale ones.
+fn rescan(env: &ExecuteEnv, config: &Config, selected_from: &ScanReport, ids: &[String]) -> Rescan {
+    let stored: HashMap<&str, &Finding> = selected_from.findings.iter().map(|f| (f.id.as_str(), f)).collect();
+    let ids = dedup(ids);
+    let rule_ids: BTreeSet<String> = ids.iter().filter_map(|id| stored.get(id)).map(|f| f.rule_id.clone()).collect();
+    let opts = ScanOptions { rule_ids: Some(rule_ids.into_iter().collect()), categories: None };
+    let report = scan_with(&env.home, &env.rules, &opts, config, || (env.processes)(), &|_| {});
+
+    let fresh: HashMap<&str, &Finding> = report.findings.iter().map(|f| (f.id.as_str(), f)).collect();
+    let mut current = Vec::new();
+    let mut stale = Vec::new();
+    for id in ids {
+        let Some(old) = stored.get(id) else {
+            stale.push(Stale { id: id.to_string(), stored: None, why: "unknown finding id".into() });
+            continue;
+        };
+        let why = match fresh.get(id) {
+            None => {
+                let failed = report.errors.iter().find(|e| e.path == old.rule_id);
+                match failed {
+                    Some(e) => format!("the new scan of rule {} failed: {}", old.rule_id, e.message),
+                    None => "a new scan no longer finds it".to_string(),
+                }
+            }
+            Some(new) => match mismatch(old, new) {
+                None => {
+                    current.push(id.to_string());
+                    continue;
+                }
+                Some(why) => why,
+            },
+        };
+        stale.push(Stale { id: id.to_string(), stored: Some((*old).clone()), why });
+    }
+    Rescan { report, current, stale }
+}
+
+/// Why a freshly scanned finding is not the one the user selected, if it is not.
+fn mismatch(old: &Finding, new: &Finding) -> Option<String> {
+    if new.action != old.action {
+        return Some(format!("its action changed from {} to {}", action_name(old.action), action_name(new.action)));
+    }
+    if new.path != old.path {
+        return Some("its path changed".into());
+    }
+    if new.command != old.command {
+        return Some(format!(
+            "its command changed to `{}`",
+            command::display_argv(new.command.as_deref().unwrap_or_default())
+        ));
+    }
+    if !new.blockers.is_empty() {
+        return Some(format!("now blocked: {}", new.blockers.join("; ")));
+    }
+    None
+}
+
+fn action_name(action: ActionKind) -> &'static str {
+    match action {
+        ActionKind::Trash => "trash",
+        ActionKind::Delete => "delete",
+        ActionKind::GitWorktreeRemove => "git-worktree-remove",
+        ActionKind::Command => "command",
+        ActionKind::InfoOnly => "info-only",
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Plan and execute against one (fresh) report
+
+/// Resolves `req.finding_ids` against `report` (pure: no rescan; [`plan_fresh`] is what the app
+/// uses). Unknown ids are an error; info-only, blocked, malformed (including commands that do not
+/// match their exact pattern) and covered-by-parent findings are excluded with a warning.
 pub fn plan(report: &ScanReport, req: &CleanRequest) -> Result<CleanPlan, CoreError> {
-    let sel = select(report, &req.finding_ids);
+    plan_with(report, req, None)
+}
+
+/// [`plan`]; with `rules`, commands are also checked against their rule's detector.
+fn plan_with(report: &ScanReport, req: &CleanRequest, rules: Option<&[RuleDef]>) -> Result<CleanPlan, CoreError> {
+    let sel = select(report, &req.finding_ids, rules);
     let unknown: Vec<&str> = sel.skipped.iter().filter(|s| s.finding.is_none()).map(|s| s.id.as_str()).collect();
     if !unknown.is_empty() {
         return Err(CoreError::NotFound(format!("unknown finding id(s): {}", unknown.join(", "))));
@@ -119,8 +342,8 @@ pub fn plan(report: &ScanReport, req: &CleanRequest) -> Result<CleanPlan, CoreEr
     if n_wt > 0 {
         warnings.push(match req.mode {
             CleanMode::Trash => format!(
-                "{n_wt} git worktree folder(s) ({}) go to the Trash, then `git worktree prune` forgets them. \
-                 The branches and their commits stay in the repository.",
+                "{n_wt} git worktree folder(s) ({}) go to the Trash together with their git admin data \
+                 (.git/worktrees/…); put both back to restore a worktree. The branches stay in the repository.",
                 human(wt_bytes)
             ),
             CleanMode::Delete => format!(
@@ -142,31 +365,23 @@ pub fn plan(report: &ScanReport, req: &CleanRequest) -> Result<CleanPlan, CoreEr
     Ok(CleanPlan { total_bytes: items.iter().map(|f| f.bytes).sum(), items, warnings })
 }
 
-/// Plans, re-validates and executes `req` against the real system ([`ExecuteEnv::system`]).
-pub fn execute(
-    report: &ScanReport,
-    req: &CleanRequest,
-    history: Option<&History>,
-    on_item: &dyn Fn(&CleanItemResult),
-) -> CleanResult {
-    execute_with(&ExecuteEnv::system(), report, req, history, on_item)
-}
-
-/// [`execute`] with explicit live-system dependencies.
+/// Re-validates and executes `req` against `report`, which must be a **fresh** scan (only
+/// [`execute_fresh_with`] calls it; never pass a stored report).
 ///
 /// Result items: first the excluded ids (`Skipped`, "skipped: …"), then the acted-on items in plan
-/// order (`Done` or `Failed`), then covered children (`Done` with `bytes: 0` when an ancestor was
-/// done, otherwise tried on their own). When not a dry run, every
-/// acted-on item (including re-validation failures) is written to the history audit log.
-/// `dry_run` performs every read-only check but changes nothing (no history write either).
-pub fn execute_with(
+/// order (`Done`, `Skipped` or `Failed`), then covered children (`Done` with `bytes: 0` when an
+/// ancestor was done, otherwise tried on their own). When not a dry run, every acted-on item
+/// (including re-validation refusals) is written to the history audit log; a failed write keeps the
+/// outcome and adds "audit log write failed" to the message. `dry_run` performs every read-only
+/// check but changes nothing (no history write either).
+pub(crate) fn execute_with(
     env: &ExecuteEnv,
     report: &ScanReport,
     req: &CleanRequest,
     history: Option<&History>,
     on_item: &dyn Fn(&CleanItemResult),
 ) -> CleanResult {
-    let sel = select(report, &req.finding_ids);
+    let sel = select(report, &req.finding_ids, Some(&env.rules));
     let mut protected = env.extra_protected.clone();
     if let Some(dir) = history.and_then(|h| h.path().parent()).filter(|d| !d.as_os_str().is_empty()) {
         protected.push(dir.to_path_buf());
@@ -206,12 +421,13 @@ pub fn execute_with(
                     message: Some(done.message),
                 }
             }
-            Err(why) => CleanItemResult {
-                finding_id: f.id.clone(),
-                outcome: CleanOutcome::Failed,
-                bytes: 0,
-                message: Some(why),
-            },
+            Err(stop) => {
+                let (outcome, why) = match stop {
+                    Stop::Skip(why) => (CleanOutcome::Skipped, format!("skipped: {why}")),
+                    Stop::Fail(why) => (CleanOutcome::Failed, why),
+                };
+                CleanItemResult { finding_id: f.id.clone(), outcome, bytes: 0, message: Some(why) }
+            }
         };
         if !req.dry_run
             && let Some(h) = history
@@ -274,8 +490,9 @@ fn label_of(f: Option<&Finding>) -> &str {
     f.map_or("?", |f| f.label.as_str())
 }
 
-/// Why a finding cannot be acted on at all, judged from the report alone.
-fn exclusion(f: &Finding) -> Option<String> {
+/// Why a finding cannot be acted on at all, judged from the report (and the rule's detector when
+/// `rules` is given).
+fn exclusion(f: &Finding, rules: Option<&[RuleDef]>) -> Option<String> {
     if f.action == ActionKind::InfoOnly {
         return Some("information only, nothing to clean".into());
     }
@@ -288,8 +505,9 @@ fn exclusion(f: &Finding) -> Option<String> {
         }
         ActionKind::Command | ActionKind::GitWorktreeRemove => match f.command.as_deref() {
             None | Some([]) => return Some("finding has no command".into()),
-            Some([program, ..]) => {
-                if let Err(e) = command::check_allowed(program) {
+            Some(argv) => {
+                let detector = rules.and_then(|rules| detector_of(rules, &f.rule_id));
+                if let Err(e) = command::check_argv(argv, f.action, detector) {
                     return Some(e);
                 }
             }
@@ -299,7 +517,11 @@ fn exclusion(f: &Finding) -> Option<String> {
     None
 }
 
-fn select<'a>(report: &'a ScanReport, ids: &[String]) -> Selection<'a> {
+fn detector_of(rules: &[RuleDef], rule_id: &str) -> Option<DetectorKind> {
+    rules.iter().find(|r| r.id == rule_id).map(|r| r.detector)
+}
+
+fn select<'a>(report: &'a ScanReport, ids: &[String], rules: Option<&[RuleDef]>) -> Selection<'a> {
     let index: HashMap<&str, (usize, &Finding)> =
         report.findings.iter().enumerate().map(|(i, f)| (f.id.as_str(), (i, f))).collect();
     let mut seen = HashSet::new();
@@ -311,7 +533,7 @@ fn select<'a>(report: &'a ScanReport, ids: &[String]) -> Selection<'a> {
         }
         match index.get(id.as_str()) {
             None => skipped.push(Skip { id: id.clone(), finding: None, reason: "unknown finding id".into() }),
-            Some(&(i, f)) => match exclusion(f) {
+            Some(&(i, f)) => match exclusion(f, rules) {
                 Some(reason) => skipped.push(Skip { id: id.clone(), finding: Some(f), reason }),
                 None => candidates.push((i, f)),
             },
@@ -346,7 +568,7 @@ fn select<'a>(report: &'a ScanReport, ids: &[String]) -> Selection<'a> {
 enum Op {
     Trash,
     Delete,
-    /// Worktree folder to the Trash, then `git worktree prune`.
+    /// Worktree folder and its admin dir to the Trash.
     WorktreeTrash,
     /// The finding's `git … worktree remove <path>` argv.
     GitWorktreeRemove,
@@ -356,6 +578,25 @@ enum Op {
 struct Done {
     op: Op,
     message: String,
+}
+
+/// Why an item was not acted on: `Skip` for a worktree that is no longer safe to remove (safety
+/// fix 3), `Fail` for everything else (guard, re-validation, tool errors).
+enum Stop {
+    Skip(String),
+    Fail(String),
+}
+
+impl From<String> for Stop {
+    fn from(why: String) -> Self {
+        Stop::Fail(why)
+    }
+}
+
+impl From<&str> for Stop {
+    fn from(why: &str) -> Self {
+        Stop::Fail(why.to_string())
+    }
 }
 
 /// `Trash`/`Delete` and worktree findings follow the clean mode (Trash mode never deletes
@@ -371,98 +612,56 @@ fn op_for(action: ActionKind, mode: CleanMode) -> Option<Op> {
     }
 }
 
-fn act(env: &ExecuteEnv, f: &Finding, req: &CleanRequest, protected: &[PathBuf]) -> Result<Done, String> {
+fn guard_err(e: CoreError) -> String {
+    match e {
+        CoreError::NotFound(_) => "no longer exists".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn act(env: &ExecuteEnv, f: &Finding, req: &CleanRequest, protected: &[PathBuf]) -> Result<Done, Stop> {
     let op = op_for(f.action, req.mode).ok_or("information only, nothing to clean")?;
+    let path = || f.path.as_deref().map(Path::new).ok_or("finding has no path");
 
-    // Path still exists and passes the guard (Command findings: the tool does the removal).
-    let target = match op {
-        Op::Trash | Op::Delete | Op::WorktreeTrash | Op::GitWorktreeRemove => {
-            let path = f.path.as_deref().ok_or("finding has no path")?;
-            Some(guard::check_target_with(Path::new(path), &env.home, protected).map_err(|e| match e {
-                CoreError::NotFound(_) => "no longer exists".to_string(),
-                other => other.to_string(),
-            })?)
-        }
-        Op::Command => None,
-    };
-
-    // Rule still matches.
+    // The rule must still be in the catalog and enabled.
     let rule = env
         .rules
         .iter()
         .find(|r| r.id == f.rule_id)
         .ok_or_else(|| format!("rule {} is no longer in the catalog", f.rule_id))?;
-    if !rule.enabled {
-        return Err(format!("rule {} is disabled", rule.id));
-    }
-    if let (Op::Trash | Op::Delete, Some(target)) = (op, &target) {
-        check_rule_roots(rule, target, &env.home)?;
-    }
 
-    // Processes that must not run (fresh snapshot).
-    if !rule.requires_quit.is_empty() {
-        let snapshot = (env.processes)();
-        let running: Vec<&str> =
-            rule.requires_quit.iter().filter(|name| snapshot.is_running(name)).map(String::as_str).collect();
-        if !running.is_empty() {
-            return Err(format!("{} is running — quit it first", running.join(", ")));
-        }
-    }
-
-    let dry = req.dry_run;
-    match (op, target) {
-        (Op::Trash, Some(target)) => {
-            if dry {
-                return Ok(Done { op, message: "dry run: would move to Trash".into() });
+    match op {
+        Op::Trash | Op::Delete => {
+            // Path still exists, passes the guard (no `.git` entry at all) and is under the rule's roots.
+            let target = guard::check_target_with(path()?, &env.home, protected).map_err(guard_err)?;
+            ensure_enabled(rule)?;
+            check_rule_roots(rule, &target, &env.home)?;
+            ensure_not_running(env, rule)?;
+            if op == Op::Trash {
+                if req.dry_run {
+                    return Ok(Done { op, message: "dry run: would move to Trash".into() });
+                }
+                (env.trash)(&target)?;
+                Ok(Done { op, message: "moved to Trash".into() })
+            } else {
+                if req.dry_run {
+                    return Ok(Done { op, message: "dry run: would delete permanently".into() });
+                }
+                delete_permanently(&target).map_err(|e| format!("delete failed: {e}"))?;
+                Ok(Done { op, message: "deleted permanently".into() })
             }
-            (env.trash)(&target)?;
-            Ok(Done { op, message: "moved to Trash".into() })
         }
-        (Op::Delete, Some(target)) => {
-            if dry {
-                return Ok(Done { op, message: "dry run: would delete permanently".into() });
-            }
-            delete_permanently(&target).map_err(|e| format!("delete failed: {e}"))?;
-            Ok(Done { op, message: "deleted permanently".into() })
+        Op::WorktreeTrash | Op::GitWorktreeRemove => {
+            ensure_enabled(rule)?;
+            act_worktree(env, f, rule, op, req.dry_run, protected)
         }
-        (Op::WorktreeTrash, Some(target)) => {
+        Op::Command => {
+            ensure_enabled(rule)?;
             let argv = f.command.as_deref().unwrap_or_default();
-            let repo = check_worktree_argv(argv, &target)?;
-            ensure_linked_worktree(&target)?;
-            let git = command::resolve_allowed(&argv[0])?;
-            ensure_worktree_clean(&git, &target)?;
-            let prune: Vec<String> = vec!["git".into(), "-C".into(), repo.into(), "worktree".into(), "prune".into()];
-            if dry {
-                return Ok(Done {
-                    op,
-                    message: format!("dry run: would move to Trash, then run `{}`", command::display_argv(&prune)),
-                });
-            }
-            (env.trash)(&target)?;
-            // The folder is already in the Trash: a failed prune only leaves a stale entry that the
-            // next scan offers as a `git worktree prune` finding.
-            let message = match run_checked(&git, &prune, GIT_STATUS_TIMEOUT) {
-                Ok(_) => format!("moved to Trash; ran `{}`", command::display_argv(&prune)),
-                Err(e) => format!("moved to Trash; {e}"),
-            };
-            Ok(Done { op, message })
-        }
-        (Op::GitWorktreeRemove, Some(target)) => {
-            let argv = f.command.as_deref().unwrap_or_default();
-            check_worktree_argv(argv, &target)?;
-            let git = command::resolve_allowed(&argv[0])?;
-            ensure_worktree_clean(&git, &target)?;
-            if dry {
-                return Ok(Done { op, message: format!("dry run: would run `{}`", command::display_argv(argv)) });
-            }
-            run_checked(&git, argv, GIT_REMOVE_TIMEOUT)?;
-            Ok(Done { op, message: "removed git worktree".into() })
-        }
-        (Op::Command, _) => {
-            let argv = f.command.as_deref().unwrap_or_default();
-            let program = argv.first().ok_or("finding has no command")?;
-            let program = command::resolve_allowed(program)?;
-            if dry {
+            command::check_argv(argv, ActionKind::Command, Some(rule.detector))?;
+            ensure_not_running(env, rule)?;
+            let program = command::resolve_allowed(&argv[0])?;
+            if req.dry_run {
                 return Ok(Done { op, message: format!("dry run: would run `{}`", command::display_argv(argv)) });
             }
             let out = run_checked(&program, argv, COMMAND_TIMEOUT)?;
@@ -472,7 +671,83 @@ fn act(env: &ExecuteEnv, f: &Finding, req: &CleanRequest, protected: &[PathBuf])
             }
             Ok(Done { op, message })
         }
-        (_, None) => Err("finding has no path".into()),
+    }
+}
+
+fn ensure_enabled(rule: &RuleDef) -> Result<(), String> {
+    if rule.enabled { Ok(()) } else { Err(format!("rule {} is disabled", rule.id)) }
+}
+
+/// `requires_quit` processes must not be running (fresh snapshot).
+fn ensure_not_running(env: &ExecuteEnv, rule: &RuleDef) -> Result<(), String> {
+    if rule.requires_quit.is_empty() {
+        return Ok(());
+    }
+    let snapshot = (env.processes)();
+    let running: Vec<&str> =
+        rule.requires_quit.iter().filter(|name| snapshot.is_running(name)).map(String::as_str).collect();
+    if running.is_empty() { Ok(()) } else { Err(format!("{} is running — quit it first", running.join(", "))) }
+}
+
+/// A linked worktree, re-checked right before acting (safety fix 3):
+/// 1. the argv is exactly `git -C <repo> worktree remove <the finding's path>`;
+/// 2. the folder has a `.git` **file** whose admin dir is `<repo>/.git/worktrees/<id>` and points back;
+/// 3. not locked, no `modules/` in the admin dir, clean `git status` (all untracked files, all
+///    submodules, whatever the user's config), no commits unreachable from the remotes —
+///    any failure here is `Skipped`;
+/// 4. the guard (only the folder's own `.git` file is allowed) for the folder and, in Trash mode,
+///    for the admin dir.
+fn act_worktree(
+    env: &ExecuteEnv,
+    f: &Finding,
+    rule: &RuleDef,
+    op: Op,
+    dry_run: bool,
+    protected: &[PathBuf],
+) -> Result<Done, Stop> {
+    let path = Path::new(f.path.as_deref().ok_or("finding has no path")?);
+    let argv = f.command.as_deref().unwrap_or_default();
+    command::check_argv(argv, ActionKind::GitWorktreeRemove, Some(rule.detector))?;
+    if std::fs::symlink_metadata(path).is_err() {
+        return Err("no longer exists".into());
+    }
+    let repo = check_worktree_argv(argv, path)?;
+    ensure_linked_worktree(path)?;
+    let admin = worktree_admin_dir(path, Path::new(repo))?;
+    let git = command::resolve_allowed(&argv[0])?;
+    recheck_worktree(&git, path, &admin).map_err(Stop::Skip)?;
+
+    let target = guard::check_worktree_target_with(path, &env.home, protected).map_err(guard_err)?;
+    ensure_not_running(env, rule)?;
+    match op {
+        Op::WorktreeTrash => {
+            let admin = guard::check_target_with(&admin, &env.home, protected)
+                .map_err(|e| format!("worktree admin dir: {}", guard_err(e)))?;
+            if dry_run {
+                return Ok(Done {
+                    op,
+                    message: format!("dry run: would move to Trash with its git admin dir {}", admin.display()),
+                });
+            }
+            (env.trash)(&target)?;
+            let message = match (env.trash)(&admin) {
+                Ok(()) => format!(
+                    "moved to Trash with its git admin dir {} (put both back to restore the worktree)",
+                    admin.display()
+                ),
+                // The folder is already in the Trash: the admin dir stays as a stale entry, which the
+                // next scan offers as a `git worktree prune` finding.
+                Err(e) => format!("moved to Trash; its git admin dir {} stayed ({e})", admin.display()),
+            };
+            Ok(Done { op, message })
+        }
+        _ => {
+            if dry_run {
+                return Ok(Done { op, message: format!("dry run: would run `{}`", command::display_argv(argv)) });
+            }
+            run_checked(&git, argv, GIT_REMOVE_TIMEOUT)?;
+            Ok(Done { op, message: "removed git worktree".into() })
+        }
     }
 }
 
@@ -486,18 +761,16 @@ fn check_rule_roots(rule: &RuleDef, target: &Path, home: &Path) -> Result<(), St
     if inside { Ok(()) } else { Err(format!("no longer matches rule {} (outside its roots)", rule.id)) }
 }
 
-/// `["git", "-C", <repo>, "worktree", "remove", <worktree path>]` (no `--force` or other flags) and
-/// the path is the finding's. Returns `<repo>`.
-fn check_worktree_argv<'a>(argv: &'a [String], target: &Path) -> Result<&'a str, String> {
+/// The worktree argv (already pattern-checked) names the finding's path. Returns `<repo>`.
+fn check_worktree_argv<'a>(argv: &'a [String], path: &Path) -> Result<&'a str, String> {
     match argv {
-        [git, c, repo, wt, rm, path]
-            if git == "git" && c == "-C" && wt == "worktree" && rm == "remove" && Path::new(repo).is_absolute() =>
-        {
-            let resolved = canonical_entry(Path::new(path)).ok_or_else(|| format!("cannot resolve {path}"))?;
-            if same_path(&resolved, target) {
+        [_, _, repo, _, _, wt] => {
+            let resolved = canonical_entry(Path::new(wt)).ok_or_else(|| format!("cannot resolve {wt}"))?;
+            let target = canonical_entry(path).ok_or_else(|| format!("cannot resolve {}", path.display()))?;
+            if same_path(&resolved, &target) {
                 Ok(repo)
             } else {
-                Err(format!("worktree command targets {path}, not the finding's path"))
+                Err(format!("worktree command targets {wt}, not the finding's path"))
             }
         }
         _ => Err(format!("unexpected worktree command `{}`", command::display_argv(argv))),
@@ -505,7 +778,7 @@ fn check_worktree_argv<'a>(argv: &'a [String], target: &Path) -> Result<&'a str,
 }
 
 /// A linked worktree has a `.git` **file** (gitdir pointer); a `.git` directory would be a
-/// repository of its own (and the guard refuses it anyway).
+/// repository of its own.
 fn ensure_linked_worktree(target: &Path) -> Result<(), String> {
     match std::fs::symlink_metadata(target.join(".git")) {
         Ok(m) if m.is_file() => Ok(()),
@@ -513,26 +786,83 @@ fn ensure_linked_worktree(target: &Path) -> Result<(), String> {
     }
 }
 
-/// Fresh `git status --porcelain` (without taking the index lock): anything listed means work
-/// that `git worktree remove` would lose or refuse.
-fn ensure_worktree_clean(git: &Path, worktree: &Path) -> Result<(), String> {
-    let args: Vec<String> = vec![
-        "--no-optional-locks".into(),
-        "-C".into(),
-        worktree.to_string_lossy().into_owned(),
-        "status".into(),
-        "--porcelain".into(),
-    ];
-    let out = command::run_with_timeout(git, &args, GIT_STATUS_TIMEOUT).map_err(|e| format!("git status: {e}"))?;
-    if !out.success {
-        return Err(format!("git status failed: {}", command::tail(&out.stderr, 300)));
+/// The worktree's own admin dir, from its `.git` file (`gitdir: <repo>/.git/worktrees/<id>`),
+/// checked both ways: it is a direct child of `<repo>/.git/worktrees` and its `gitdir` file points
+/// back at this worktree's `.git`.
+fn worktree_admin_dir(worktree: &Path, repo: &Path) -> Result<PathBuf, String> {
+    let dot_git = worktree.join(".git");
+    let text = std::fs::read_to_string(&dot_git).map_err(|e| format!("cannot read {}: {e}", dot_git.display()))?;
+    let pointer = text
+        .lines()
+        .find_map(|l| l.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .ok_or_else(|| format!("{} has no gitdir line", dot_git.display()))?;
+    let admin = if Path::new(pointer).is_absolute() { PathBuf::from(pointer) } else { worktree.join(pointer) };
+    let admin =
+        std::fs::canonicalize(&admin).map_err(|e| format!("worktree admin dir {} is missing: {e}", admin.display()))?;
+    let worktrees = std::fs::canonicalize(repo.join(".git/worktrees"))
+        .map_err(|e| format!("{} has no .git/worktrees: {e}", repo.display()))?;
+    if !admin.parent().is_some_and(|p| same_path(p, &worktrees)) || !admin.is_dir() {
+        return Err(format!("worktree admin dir {} is not inside {}", admin.display(), worktrees.display()));
     }
-    let changed = out.stdout.lines().filter(|l| !l.trim().is_empty()).count();
+    let back = std::fs::read_to_string(admin.join("gitdir"))
+        .map_err(|e| format!("cannot read {}/gitdir: {e}", admin.display()))?;
+    let back = canonical_entry(Path::new(back.trim()));
+    let own = canonical_entry(&dot_git);
+    match (back, own) {
+        (Some(back), Some(own)) if same_path(&back, &own) => Ok(admin),
+        _ => Err(format!("worktree admin dir {} belongs to another worktree", admin.display())),
+    }
+}
+
+/// Fresh re-check of a worktree that is about to be removed (never takes the index lock). The
+/// error says why it is no longer safe.
+fn recheck_worktree(git: &Path, worktree: &Path, admin: &Path) -> Result<(), String> {
+    if std::fs::symlink_metadata(admin.join("locked")).is_ok() {
+        let reason = std::fs::read_to_string(admin.join("locked")).unwrap_or_default();
+        let reason = reason.trim();
+        return Err(if reason.is_empty() {
+            "worktree is locked".into()
+        } else {
+            format!("worktree is locked: {reason}")
+        });
+    }
+    if std::fs::symlink_metadata(admin.join("modules")).is_ok() {
+        return Err(format!(
+            "worktree has initialized submodules (their git data is in {}/modules); remove it by hand",
+            admin.display()
+        ));
+    }
+    let wt = worktree.to_string_lossy().into_owned();
+    let git_in_worktree = |args: &[&str]| -> Result<String, String> {
+        let mut argv: Vec<String> = vec!["--no-optional-locks".into(), "-C".into(), wt.clone()];
+        argv.extend(args.iter().map(|a| a.to_string()));
+        let out =
+            command::run_with_timeout(git, &argv, GIT_STATUS_TIMEOUT).map_err(|e| format!("git {}: {e}", args[0]))?;
+        if out.success {
+            Ok(out.stdout)
+        } else {
+            Err(format!("git {} failed: {}", args[0], command::tail(&out.stderr, 300)))
+        }
+    };
+    let status = git_in_worktree(&WORKTREE_STATUS_ARGS)?;
+    let changed = status.lines().filter(|l| !l.trim().is_empty()).count();
     if changed > 0 {
         return Err(format!("worktree has uncommitted changes ({changed} path(s))"));
     }
-    Ok(())
+    let unpushed = git_in_worktree(&["rev-list", "--count", "HEAD", "--not", "--remotes"])?;
+    match unpushed.trim().parse::<u64>() {
+        Ok(0) => Ok(()),
+        Ok(n) => Err(format!("worktree has {n} commit(s) that are not on any remote branch")),
+        Err(_) => Err(format!("unexpected `git rev-list --count` output: {}", unpushed.trim())),
+    }
 }
+
+/// `git status` arguments for "is this worktree clean?", shared with the `git-worktrees` detector:
+/// every untracked file and every submodule counts, whatever the user's or repository's config
+/// (`status.showUntrackedFiles=no` must not hide files from the check).
+pub const WORKTREE_STATUS_ARGS: [&str; 4] =
+    ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"];
 
 fn run_checked(program: &Path, argv: &[String], timeout: Duration) -> Result<command::Output, String> {
     let shown = command::display_argv(argv);
@@ -579,5 +909,7 @@ fn human(bytes: u64) -> String {
     if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
+#[cfg(test)]
+mod regression_tests;
 #[cfg(test)]
 mod tests;

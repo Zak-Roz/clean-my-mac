@@ -4,21 +4,26 @@
 //! worktree's `.git` file also leads back to its main repository. Per repository:
 //! - each linked worktree → `git-worktree-remove` finding with
 //!   `command = ["git", "-C", <repo>, "worktree", "remove", <path>]` (ARCHITECTURE.md §10) and
-//!   blockers for: locked, uncommitted/untracked changes, HEAD not reachable from any remote branch
-//!   nor merged into the default branch, outside the home folder;
-//! - directories under `<repo>/.claude/worktrees/` that git does not know → `trash` findings;
-//! - prunable entries (directory gone) → one `command` finding running `git worktree prune`.
+//!   blockers for: locked, initialized submodules (`modules/` in its admin dir), uncommitted or
+//!   untracked changes (the executor's exact `git status` flags, whatever the user's config),
+//!   commits not on any remote branch (`git rev-list HEAD --not --remotes`), outside the home folder
+//!   — the same checks the executor repeats right before acting (safety fix 3);
+//! - directories under `<repo>/.claude/worktrees/` that git does not know → `trash` findings
+//!   (blocked when they still hold a `.git` file: the guard refuses any `.git` entry);
+//! - prunable entries (directory gone) → one `command` finding running `git worktree prune`,
+//!   always `review` and never preselected (a "gone" folder may be on an unmounted disk).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::actions::WORKTREE_STATUS_ARGS;
 use crate::detectors::external;
 use crate::detectors::support::{days_since, for_each_root, list_dir, param_u64, walk_dirs};
 use crate::detectors::{Detector, make_finding};
 use crate::error::CoreError;
-use crate::model::{ActionKind, Finding, RuleDef};
+use crate::model::{ActionKind, Finding, Risk, RuleDef};
 use crate::scan::ScanContext;
 use crate::size::SizeInfo;
 
@@ -108,25 +113,6 @@ fn find_repos(root: &Path, max_depth: usize, repos: &mut BTreeSet<PathBuf>) -> R
     })
 }
 
-/// The local default branch: origin/HEAD's target if checked out locally, else `main`, else `master`.
-fn default_branch(repo: &Path) -> Option<String> {
-    let out =
-        git(repo, &["for-each-ref", "--format=%(refname)%09%(symref)", "refs/heads/", "refs/remotes/origin/HEAD"])
-            .ok()?;
-    let mut locals = BTreeSet::new();
-    let mut origin_head = None;
-    for line in out.stdout.lines() {
-        let (name, symref) = line.split_once('\t').unwrap_or((line, ""));
-        if name == "refs/remotes/origin/HEAD" {
-            origin_head = symref.strip_prefix("refs/remotes/origin/").map(str::to_string);
-        } else if let Some(short) = name.strip_prefix("refs/heads/") {
-            locals.insert(short.to_string());
-        }
-    }
-    let candidates = origin_head.into_iter().chain(["main".to_string(), "master".to_string()]);
-    candidates.into_iter().find(|b| locals.contains(b)).map(|b| format!("refs/heads/{b}"))
-}
-
 fn short_branch(entry: &WorktreeEntry) -> String {
     match (&entry.branch, &entry.head) {
         (Some(b), _) => b.strip_prefix("refs/heads/").unwrap_or(b).to_string(),
@@ -135,8 +121,16 @@ fn short_branch(entry: &WorktreeEntry) -> String {
     }
 }
 
-/// Blockers for removing one linked worktree.
-fn blockers_for(repo: &Path, entry: &WorktreeEntry, default: Option<&str>, home: &Path) -> Vec<String> {
+/// The admin dir (`<repo>/.git/worktrees/<id>`) a linked worktree's `.git` file points to.
+fn admin_dir_of(worktree: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
+    let pointer = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
+    let admin = PathBuf::from(pointer);
+    Some(if admin.is_absolute() { admin } else { worktree.join(admin) })
+}
+
+/// Blockers for removing one linked worktree (the executor re-checks the same things).
+fn blockers_for(repo: &Path, entry: &WorktreeEntry, home: &Path) -> Vec<String> {
     let mut blockers = Vec::new();
     if let Some(reason) = &entry.locked {
         blockers.push(if reason.is_empty() {
@@ -145,7 +139,10 @@ fn blockers_for(repo: &Path, entry: &WorktreeEntry, default: Option<&str>, home:
             format!("Worktree is locked: {reason}")
         });
     }
-    match git(&entry.path, &["status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none"]) {
+    if admin_dir_of(&entry.path).is_some_and(|admin| admin.join("modules").symlink_metadata().is_ok()) {
+        blockers.push("Has initialized submodules (their git data lives in the worktree's admin dir)".into());
+    }
+    match git(&entry.path, &WORKTREE_STATUS_ARGS) {
         Ok(out) => {
             let n = out.stdout.lines().filter(|l| !l.trim().is_empty()).count();
             if n > 0 {
@@ -156,16 +153,11 @@ fn blockers_for(repo: &Path, entry: &WorktreeEntry, default: Option<&str>, home:
         Err(e) => blockers.push(format!("Could not check worktree status: {e}")),
     }
     if let Some(head) = &entry.head {
-        let mut args = vec!["rev-list", "--count", head.as_str(), "--not", "--remotes"];
-        if let Some(default) = default {
-            args.push(default);
-        }
-        match git(repo, &args).map(|o| o.stdout.trim().parse::<u64>()) {
+        match git(repo, &["rev-list", "--count", head.as_str(), "--not", "--remotes"])
+            .map(|o| o.stdout.trim().parse::<u64>())
+        {
             Ok(Ok(0)) => {}
-            Ok(Ok(n)) => {
-                let target = default.map(|d| d.trim_start_matches("refs/heads/")).unwrap_or("the default branch");
-                blockers.push(format!("Unpushed commits ({n} not on any remote branch or merged into {target})"));
-            }
+            Ok(Ok(n)) => blockers.push(format!("Unpushed commits ({n} not on any remote branch)")),
             Ok(Err(_)) | Err(_) => blockers.push("Could not check for unpushed commits".into()),
         }
     }
@@ -181,7 +173,6 @@ fn repo_findings(rule: &RuleDef, ctx: &ScanContext, repo: &Path) -> Result<Vec<F
     let repo_name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let repo_s = path_str(repo);
     let group = Some(repo_s.clone());
-    let default = default_branch(repo);
 
     let linked: Vec<&WorktreeEntry> = entries.iter().skip(1).filter(|e| !e.bare).collect();
     let prunable: Vec<&&WorktreeEntry> = linked.iter().filter(|e| e.prunable.is_some()).collect();
@@ -201,7 +192,7 @@ fn repo_findings(rule: &RuleDef, ctx: &ScanContext, repo: &Path) -> Result<Vec<F
             f.action = ActionKind::GitWorktreeRemove;
             f.command = Some(vec!["git".into(), "-C".into(), repo_s.clone(), "worktree".into(), "remove".into(), wt]);
             f.group = group.clone();
-            for blocker in blockers_for(repo, entry, default.as_deref(), &ctx.home) {
+            for blocker in blockers_for(repo, entry, &ctx.home) {
                 f.add_blocker(blocker);
             }
             f
@@ -213,10 +204,10 @@ fn repo_findings(rule: &RuleDef, ctx: &ScanContext, repo: &Path) -> Result<Vec<F
     if let Ok(children) = list_dir(&repo.join(".claude/worktrees")) {
         for child in children.iter().filter(|c| c.is_dir() && !registered.contains(&canonical(&c.path))) {
             let dot_git = child.path.join(".git");
-            let orphaned = match dot_git.symlink_metadata() {
-                Err(_) => true,
-                Ok(m) if m.is_file() => main_repo_of_worktree(&dot_git).is_none(),
-                Ok(_) => false, // an independent clone, not a worktree
+            let (orphaned, has_git_file) = match dot_git.symlink_metadata() {
+                Err(_) => (true, false),
+                Ok(m) if m.is_file() => (main_repo_of_worktree(&dot_git).is_none(), true),
+                Ok(_) => (false, false), // an independent clone, not a worktree
             };
             if !orphaned {
                 continue;
@@ -226,14 +217,27 @@ fn repo_findings(rule: &RuleDef, ctx: &ScanContext, repo: &Path) -> Result<Vec<F
             let mut f = make_finding(rule, &path_str(&child.path), Some(&child.path), &size, reason);
             f.action = ActionKind::Trash;
             f.group = group.clone();
+            if has_git_file {
+                f.add_blocker("Still has a .git file (a broken worktree link): check it and remove it by hand");
+            }
             findings.push(f);
         }
     }
 
     if !prunable.is_empty() {
-        let reason = format!("{} stale worktree entries whose folders no longer exist", prunable.len());
+        let shown: Vec<String> = prunable.iter().take(3).map(|e| path_str(&e.path)).collect();
+        let more = if prunable.len() > shown.len() { ", …" } else { "" };
+        let reason = format!(
+            "{} stale worktree entries whose folders no longer exist ({}{more}); if one is on a disk that \
+             is only unmounted, pruning deletes its git data",
+            prunable.len(),
+            shown.join(", ")
+        );
         let mut f = make_finding(rule, &format!("{repo_s}#prune"), None, &SizeInfo::default(), reason);
         f.label = format!("{repo_name}: prune worktree entries");
+        // Safety fix 3: review risk whatever the rule says, never preselected.
+        f.risk = Risk::Review;
+        f.selected_by_default = false;
         f.action = ActionKind::Command;
         f.command = Some(vec!["git".into(), "-C".into(), repo_s.clone(), "worktree".into(), "prune".into()]);
         f.group = group.clone();
@@ -369,10 +373,7 @@ mod tests {
         assert!(clean.reason.starts_with("Git worktree of repo on clean"), "{}", clean.reason);
 
         assert_eq!(by_label("dirty").blockers, vec!["Uncommitted changes in worktree (1 file)"]);
-        assert_eq!(
-            by_label("ahead").blockers,
-            vec!["Unpushed commits (1 not on any remote branch or merged into main)"]
-        );
+        assert_eq!(by_label("ahead").blockers, vec!["Unpushed commits (1 not on any remote branch)"]);
         assert!(by_label("pushed").blockers.is_empty(), "{:?}", by_label("pushed").blockers);
         assert_eq!(by_label("locked").blockers, vec!["Worktree is locked: in use"]);
 
@@ -383,6 +384,9 @@ mod tests {
         let prune = by_label("repo: prune worktree entries");
         assert_eq!(prune.action, ActionKind::Command);
         assert!(prune.path.is_none());
+        assert_eq!(prune.risk, Risk::Review);
+        assert!(!prune.selected_by_default);
+        assert!(prune.reason.contains(&wt("gone").to_string_lossy().into_owned()), "{}", prune.reason);
         assert_eq!(prune.command.as_ref().unwrap(), &vec!["git", "-C", &repo_s, "worktree", "prune"]);
         assert_eq!(prune.id, format!("dev.worktrees:{repo_s}#prune"));
     }
@@ -395,6 +399,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         git_cmd(&repo, &["init", "-q", "-b", "main"]);
         git_cmd(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git_cmd(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         let wt = home.join("Developer/wt");
         git_cmd(&repo, &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()]);
 
@@ -411,6 +416,55 @@ mod tests {
         assert_eq!(found[0].label, "wt");
         assert!(found[0].reason.contains("detached at"), "{}", found[0].reason);
         assert!(found[0].blockers.is_empty(), "{:?}", found[0].blockers);
+    }
+
+    /// Safety fix 3: the detector blocks what the executor would refuse, whatever the user's config.
+    #[test]
+    fn hidden_untracked_files_submodules_and_local_only_commits_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let repo = home.join("Developer/repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_cmd(&repo, &["init", "-q", "-b", "main"]);
+        git_cmd(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let wt = |name: &str| repo.join(".claude/worktrees").join(name);
+        let add = |name: &str| git_cmd(&repo, &["worktree", "add", "-q", "-b", name, wt(name).to_str().unwrap()]);
+
+        git_cmd(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        add("hidden");
+        git_cmd(&repo, &["config", "status.showUntrackedFiles", "no"]);
+        file(&wt("hidden").join("notes.md"), 10, 0);
+        add("subs");
+        std::fs::create_dir_all(repo.join(".git/worktrees/subs/modules/lib")).unwrap();
+        add("clean");
+        // A commit merged into the local main branch but on no remote branch still blocks.
+        add("local");
+        git_cmd(&wt("local"), &["commit", "-q", "--allow-empty", "-m", "local work"]);
+        git_cmd(&repo, &["merge", "-q", "--ff-only", "local"]);
+        // A leftover folder that still has a .git file pointing nowhere.
+        file(&wt("broken").join("big.bin"), 1000, 0);
+        std::fs::write(wt("broken").join(".git"), "gitdir: /nowhere/.git/worktrees/broken\n").unwrap();
+
+        let env = TestEnv::new(&home);
+        let r = rule(
+            "dev.worktrees",
+            DetectorKind::GitWorktrees,
+            ActionKind::GitWorktreeRemove,
+            &["~/Developer"],
+            serde_json::json!({}),
+        );
+        let found = GitWorktreesDetector.detect(&r, &env.ctx()).unwrap();
+        let by_label = |l: &str| found.iter().find(|f| f.label == l).unwrap_or_else(|| panic!("no finding {l}"));
+        assert_eq!(by_label("local").blockers, vec!["Unpushed commits (1 not on any remote branch)"]);
+        assert_eq!(by_label("hidden").blockers, vec!["Uncommitted changes in worktree (1 file)"]);
+        assert_eq!(
+            by_label("subs").blockers,
+            vec!["Has initialized submodules (their git data lives in the worktree's admin dir)"]
+        );
+        assert!(by_label("clean").blockers.is_empty(), "{:?}", by_label("clean").blockers);
+        let broken = by_label("broken");
+        assert_eq!(broken.action, ActionKind::Trash);
+        assert!(broken.blockers[0].starts_with("Still has a .git file"), "{:?}", broken.blockers);
     }
 
     #[test]
