@@ -16,4 +16,4 @@ pub mod volume;
 pub use config::Config;
 pub use error::CoreError;
 pub use model::*;
-pub use scan::{ScanContext, scan};
+pub use scan::{ScanContext, scan, scan_at};

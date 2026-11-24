@@ -2,7 +2,7 @@
 //!
 //! [`scan_at`] runs the selected rules in parallel (rayon), turns every failing (or panicking)
 //! detector into a [`ScanError`], adds `requires_quit` blockers, drops findings below
-//! `min_finding_bytes` (informational findings are exempt), removes findings covered by an
+//! `min_finding_bytes` (`Command` and `InfoOnly` findings are exempt), removes findings covered by an
 //! unblocked ancestor finding (ARCHITECTURE.md §10) and sorts by allocated bytes.
 
 use std::collections::{HashMap, HashSet};
@@ -118,7 +118,7 @@ pub(crate) fn scan_with(
             Err(e) => errors.push(ScanError { path: rule.id.clone(), message: e.to_string() }),
         }
     }
-    findings.retain(|f| f.bytes >= config.min_finding_bytes || f.action == ActionKind::InfoOnly);
+    findings.retain(|f| above_min_size(f, config.min_finding_bytes));
     let mut findings = drop_covered_findings(findings);
     findings.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.id.cmp(&b.id)));
 
@@ -137,6 +137,12 @@ pub(crate) fn scan_with(
         findings,
         errors,
     }
+}
+
+/// `min_finding_bytes` filter (contract v2): `Command` and `InfoOnly` findings are kept whatever
+/// their size (a zero-byte `git worktree prune`, a blocked simulator runtime).
+fn above_min_size(f: &Finding, min_bytes: u64) -> bool {
+    f.bytes >= min_bytes || matches!(f.action, ActionKind::Command | ActionKind::InfoOnly)
 }
 
 /// One rule: detector (a panic becomes an error) + `requires_quit` blockers.
@@ -261,6 +267,18 @@ mod tests {
 
     fn ids(findings: &[Finding]) -> Vec<&str> {
         findings.iter().map(|f| f.id.as_str()).collect()
+    }
+
+    #[test]
+    fn min_size_exempts_command_and_info_only_findings() {
+        let finding = |action, bytes| Finding { action, bytes, ..finding("r:x", Some("/x"), false) };
+        let min = 50 * MIB as u64;
+        assert!(!above_min_size(&finding(ActionKind::Trash, min - 1), min));
+        assert!(!above_min_size(&finding(ActionKind::Delete, 0), min));
+        assert!(!above_min_size(&finding(ActionKind::GitWorktreeRemove, 1), min));
+        assert!(above_min_size(&finding(ActionKind::Trash, min), min));
+        assert!(above_min_size(&finding(ActionKind::Command, 0), min));
+        assert!(above_min_size(&finding(ActionKind::InfoOnly, 0), min));
     }
 
     #[test]
