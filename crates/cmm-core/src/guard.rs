@@ -1,4 +1,4 @@
-//! Path guard (owned by S3). See ARCHITECTURE.md §6.2.
+//! Path guard. See ARCHITECTURE.md §6.2.
 //!
 //! Every path the app is about to trash or delete goes through [`check_target`] right before the
 //! action. The guard never follows the final path component: a symlink is judged (and later
@@ -54,7 +54,7 @@ pub fn check_worktree_target_with(path: &Path, home: &Path, extra_protected: &[P
 /// Which `.git` entries a target may contain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GitEntries {
-    /// None at all (safety fix 2): a `.git` file or directory anywhere inside means a checkout.
+    /// None at all (safeguard 2): a `.git` file or directory anywhere inside means a checkout.
     None,
     /// Only the target's own top-level `.git` regular file (a linked worktree).
     OwnWorktreeFile,

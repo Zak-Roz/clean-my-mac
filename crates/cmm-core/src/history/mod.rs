@@ -1,4 +1,4 @@
-//! Scan/action history in `data_dir/history.sqlite` (owned by S3). See ARCHITECTURE.md §8.
+//! Scan/action history in `data_dir/history.sqlite`. See ARCHITECTURE.md §8.
 //!
 //! WAL mode with a busy timeout, so the CLI and the desktop app can have the database open at the
 //! same time. Timestamps are stored as fixed-width RFC3339 UTC strings (`…T10:00:00.000Z`), which
@@ -19,7 +19,7 @@ use crate::model::{
 /// Current schema version (`PRAGMA user_version`).
 pub const SCHEMA_VERSION: i32 = 1;
 
-/// Version 1: the §8 schema (contract v2: `actions.outcome` instead of `ok`) plus lookup indexes.
+/// Version 1: the ARCHITECTURE.md §8 schema plus lookup indexes.
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS scans (
     id TEXT PRIMARY KEY,

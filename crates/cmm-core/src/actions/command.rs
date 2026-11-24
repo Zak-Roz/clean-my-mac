@@ -1,11 +1,11 @@
 //! Allowlisted external commands (ARCHITECTURE.md §6.4). Programs are resolved and run by the
-//! shared helpers in [`crate::process`] (contract v2: one timed runner, one resolver).
+//! shared helpers in [`crate::process`] (one timed runner, one resolver).
 //!
 //! On top of the program allowlist, every argv must match one exact per-detector pattern
-//! (safety fix 6, [`check_argv`]); anything else is refused even when `argv[0]` is allowlisted.
-//! A repository-wide `git worktree prune` is deliberately not a pattern (re-review follow-up after
-//! a28953e): it can drop the admin data of a worktree on an unmounted disk, so no finding, stored
-//! report or hand-edited `last-report.json` can make the executor run it.
+//! (ARCHITECTURE.md §10, safeguard 6, [`check_argv`]); anything else is refused even when `argv[0]`
+//! is allowlisted. A repository-wide `git worktree prune` is deliberately not a pattern (safeguard
+//! 3): it can drop the admin data of a worktree on an unmounted disk, so no finding, stored report
+//! or hand-edited `last-report.json` can make the executor run it.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -26,7 +26,7 @@ pub(crate) fn check_allowed(program: &str) -> Result<(), String> {
     }
 }
 
-/// The exact command shapes the detectors produce (safety fix 6).
+/// The exact command shapes the detectors produce (safeguard 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pattern {
     /// `docker system prune -f`
@@ -202,7 +202,7 @@ mod tests {
             &["xcrun", "simctl", "erase", "all"],
             &["xcrun", "simctl", "runtime", "delete", "all"],
             &["xcrun", "simctl", "runtime", "delete", "1234"],
-            // Never executable, however well-formed (re-review follow-up after a28953e).
+            // Never executable, however well-formed (safeguard 3).
             &["git", "-C", "/Users/x/repo", "worktree", "prune"],
             &["git", "-C", "relative/repo", "worktree", "prune"],
             &["git", "-C", "/Users/x/../y", "worktree", "prune"],

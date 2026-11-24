@@ -1,5 +1,5 @@
-// Growth rows from the history database (contract v2): `kind` says whether a row sums a rule or
-// tracks one finding, so keys are never parsed.
+// Growth rows from the history database: `kind` says whether a row sums a rule or tracks one
+// finding, so keys are never parsed.
 
 import type { Finding } from "../bindings/Finding";
 import type { GrowthItem } from "../bindings/GrowthItem";

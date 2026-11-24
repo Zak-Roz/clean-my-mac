@@ -1,10 +1,10 @@
-//! `cmm clean (--id … | --rule … | --safe) [--delete] [--yes]` (owned by S3).
+//! `cmm clean (--id … | --rule … | --safe) [--delete] [--yes]`.
 //!
 //! Scans only the rules involved, plans and prints the plan, then runs the executor: as a dry run
 //! unless `--yes`. The executor is [`actions::execute_fresh`]: it scans those rules once more and
-//! acts only on findings that are still exactly what the plan showed (safety fix 1), so nothing is
+//! acts only on findings that are still exactly what the plan showed (safeguard 1), so nothing is
 //! ever done on stale data. With `--yes` the history database must open, because every executed
-//! action goes to its audit log (safety fix 5).
+//! action goes to its audit log (safeguard 5; see ARCHITECTURE.md §10).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;

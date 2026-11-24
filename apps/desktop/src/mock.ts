@@ -1,7 +1,7 @@
 // Mock backend for `VITE_MOCK=1` (ARCHITECTURE.md §7): serves fixtures/sample-report.json and
 // simulates everything else so every screen can be exercised in a plain browser:
 // - scans emit `scan://progress` over ~2.5 s;
-// - plan/execute re-scan like the core does (safety fix 1): at plan time one item turns out blocked
+// - plan/execute re-scan like the core does (safeguard 1): at plan time one item turns out blocked
 //   ("Claude is running") and is left out with a "no longer matches the scan" warning; at execute
 //   time the leftover worktree folder has become a real worktree and is skipped, the Docker prune
 //   fails, the rest succeed; cleaned findings disappear from later scans;

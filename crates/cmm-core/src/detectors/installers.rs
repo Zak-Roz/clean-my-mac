@@ -1,4 +1,4 @@
-//! `installers` detector — `.dmg .pkg .iso .xip .mpkg` older than `days` (owned by S2).
+//! `installers` detector — `.dmg .pkg .iso .xip .mpkg` older than `days`.
 //!
 //! Params: `days` (default `config.installers_older_than_days`), `extensions` (default
 //! `dmg pkg mpkg iso xip`), `depth` (default 3). Age is the newer of mtime and birth time, so a

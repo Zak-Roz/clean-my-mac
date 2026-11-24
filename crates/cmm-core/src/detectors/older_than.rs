@@ -1,5 +1,4 @@
-//! `older-than` detector — one finding per direct child of each root not used for `days`
-//! (owned by S1).
+//! `older-than` detector — one finding per direct child of each root not used for `days`.
 //!
 //! "Last used" is the newest of: the mtime of anything inside the child, and Spotlight's
 //! `kMDItemLastUsedDate` / `kMDItemDateAdded` of the child itself. Spotlight dates come from one

@@ -1,4 +1,4 @@
-//! `git-worktrees` detector — linked and orphaned git worktrees (owned by S2).
+//! `git-worktrees` detector — linked and orphaned git worktrees.
 //!
 //! Repositories are found under the roots (depth ≤ 4, no hidden dirs, no node_modules); a linked
 //! worktree's `.git` file also leads back to its main repository. Per repository:
@@ -7,7 +7,7 @@
 //!   blockers for: locked, initialized submodules (`modules/` in its admin dir), uncommitted or
 //!   untracked changes (the executor's exact `git status` flags, whatever the user's config),
 //!   commits not on any remote branch (`git rev-list HEAD --not --remotes`), outside the home folder
-//!   — the same checks the executor repeats right before acting (safety fix 3);
+//!   — the same checks the executor repeats right before acting (safeguard 3);
 //! - directories under `<repo>/.claude/worktrees/` that git does not know → `trash` findings
 //!   (blocked when they still hold a `.git` file: the guard refuses any `.git` entry);
 //! - prunable entries (directory gone) → one `info-only` finding that lists them and tells the
@@ -236,7 +236,7 @@ fn repo_findings(rule: &RuleDef, ctx: &ScanContext, repo: &Path) -> Result<Vec<F
 const STALE_ENTRIES_SHOWN: usize = 10;
 
 /// The stale worktree entries of one repository (their folders are gone), as an `info-only`
-/// finding: never selectable, never executed (re-review follow-up after a28953e). The reason names
+/// finding: never selectable, never executed (ARCHITECTURE.md §10, safeguard 3). The reason names
 /// the entries and the command the user can run once they have checked them.
 fn stale_entries_finding(rule: &RuleDef, repo_s: &str, repo_name: &str, prunable: &[&&WorktreeEntry]) -> Finding {
     let n = prunable.len();
@@ -273,8 +273,8 @@ impl Detector for GitWorktreesDetector {
         let mut repos = BTreeSet::new();
         for_each_root(rule, ctx, |root| find_repos(root, depth, &mut repos))?;
 
-        // A failing repository never hides the others (contract v2): each failure is warned; only
-        // when every repository failed does the rule fail (with the first error).
+        // A failing repository never hides the others: each failure is warned; only when every
+        // repository failed does the rule fail (with the first error).
         let results: Vec<(&PathBuf, Result<Vec<Finding>, CoreError>)> =
             repos.par_iter().map(|repo| (repo, repo_findings(rule, ctx, repo))).collect();
         let any_ok = results.iter().any(|(_, r)| r.is_ok());
@@ -478,7 +478,7 @@ mod tests {
         assert!(found[0].blockers.is_empty(), "{:?}", found[0].blockers);
     }
 
-    /// Safety fix 3: the detector blocks what the executor would refuse, whatever the user's config.
+    /// Safeguard 3: the detector blocks what the executor would refuse, whatever the user's config.
     #[test]
     fn hidden_untracked_files_submodules_and_local_only_commits_block() {
         let tmp = tempfile::tempdir().unwrap();

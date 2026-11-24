@@ -1,4 +1,4 @@
-//! clean-my-mac core library. See docs/ARCHITECTURE.md for the contract.
+//! clean-my-mac core library. See docs/ARCHITECTURE.md for the design.
 
 pub mod actions;
 pub mod agent;

@@ -1,4 +1,4 @@
-//! Consistency checks for the built-in catalog `rules/default.toml` (owned by S2).
+//! Consistency checks for the built-in catalog `rules/default.toml`.
 
 use std::collections::HashSet;
 
@@ -172,7 +172,7 @@ fn required_coverage() {
     assert_eq!(kinds.len(), 9, "every detector kind is used by at least one rule");
 }
 
-/// Safety fix 4: the transcripts rule proposes old, large session logs one by one, grouped by
+/// Safeguard 4: the transcripts rule proposes old, large session logs one by one, grouped by
 /// project folder, and never the project folder itself or its `memory/`.
 #[test]
 fn claude_code_memory_is_never_proposed() {

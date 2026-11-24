@@ -62,7 +62,7 @@ pub fn run(args: ScanArgs) -> Result<ExitCode> {
     if show_progress {
         eprint!("\r\x1b[2K");
     }
-    // History compares whole scans: only unfiltered ones are recorded (contract v2).
+    // History compares whole scans: only unfiltered ones are recorded.
     let history = if !args.no_record && cmm_core::scan::is_full_scan(&opts) { record(&config, &report) } else { None };
     let notified = args.notify.then(|| notify(&config, &report, history.as_ref()));
     if args.json {

@@ -1,4 +1,4 @@
-//! `versioned-siblings` detector — siblings differing only by date/version tokens; all but the newest `keep` (owned by S2).
+//! `versioned-siblings` detector — siblings differing only by date/version tokens; all but the newest `keep`.
 //!
 //! Params: `keep` (default `config.keep_versions`), `depth` (default 3: the root's entries and two
 //! levels below). Siblings are grouped by [`naming::name_info`] key (and file vs directory); a group

@@ -473,7 +473,7 @@ fn command_findings_free_space_directly_and_failures_capture_stderr() {
     assert!(err.contains("cannot change to"), "{err}");
 }
 
-/// Safety fix 6: an allowlisted program with any other argv, or a pattern from another detector,
+/// Safeguard 6: an allowlisted program with any other argv, or a pattern from another detector,
 /// is refused by the plan and by the executor.
 #[test]
 fn commands_must_match_their_exact_per_detector_pattern() {
@@ -777,7 +777,7 @@ fn worktree_command_must_match_the_finding() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// fresh scan, audit log (safety fixes 1 and 5)
+// fresh scan, audit log (safeguards 1 and 5)
 
 impl Fx {
     fn config(&self) -> Config {
@@ -910,7 +910,7 @@ fn fresh_blockers_skip_the_item() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// fresh scan: size and file-vs-folder kind (re-review follow-up after a28953e)
+// fresh scan: size and file-vs-folder kind (safeguard 1)
 
 const MIB: usize = 1024 * 1024;
 

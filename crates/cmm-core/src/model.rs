@@ -1,8 +1,8 @@
 //! Core data model shared by the CLI, the desktop app (via ts-rs bindings) and history.
 //!
-//! This file is the contract (docs/ARCHITECTURE.md §2). Do not change public types without the
-//! coordinator's approval. Structs serialize with camelCase fields, enums as kebab-case strings.
-//! TypeScript bindings: `cargo test -p cmm-core export_bindings` -> `apps/desktop/src/bindings/`.
+//! Described in docs/ARCHITECTURE.md §2. Structs serialize with camelCase fields, enums as
+//! kebab-case strings. TypeScript bindings: `cargo test -p cmm-core export_bindings` ->
+//! `apps/desktop/src/bindings/`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -231,7 +231,7 @@ pub struct CleanRequest {
     pub dry_run: bool,
 }
 
-/// What happened to one requested item (contract v2, replaces `ok: bool`).
+/// What happened to one requested item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
 #[ts(export)]
@@ -265,7 +265,7 @@ pub struct CleanResult {
     pub moved_to_trash_bytes: u64,
 }
 
-/// Whether a [`GrowthItem`] sums a whole rule or tracks one finding (contract v2).
+/// Whether a [`GrowthItem`] sums a whole rule or tracks one finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
 #[ts(export)]

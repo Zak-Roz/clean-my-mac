@@ -1,6 +1,5 @@
 //! Running-process snapshot used for `requires_quit` blockers, and the one bounded runner used for
-//! every external tool, by detectors (`git`, `xcrun`, `docker`, `mdls`) and the clean executor alike
-//! (owned by S1; contract v2).
+//! every external tool, by detectors (`git`, `xcrun`, `docker`, `mdls`) and the clean executor alike.
 //!
 //! Tools are resolved to absolute paths in [`TOOL_DIRS`], never through `$PATH`: an app launched
 //! from Finder has a minimal `PATH` without Homebrew or Docker, and a planted `~/bin/git` must not
@@ -23,7 +22,7 @@ use crate::error::CoreError;
 /// Upper bound for one external tool invocation (ARCHITECTURE.md §10).
 pub const TOOL_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Where external tools are looked up, in order (ARCHITECTURE.md §10, contract v2).
+/// Where external tools are looked up, in order (ARCHITECTURE.md §10).
 pub const TOOL_DIRS: &[&str] =
     &["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/Applications/Docker.app/Contents/Resources/bin"];
 

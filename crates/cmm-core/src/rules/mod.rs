@@ -1,4 +1,4 @@
-//! Rule catalog loading and root expansion (owned by S1; catalog content in `rules/default.toml` by S2).
+//! Rule catalog loading and root expansion. The built-in catalog is `rules/default.toml`.
 //!
 //! Rule files (the built-in catalog and every `rules.d/*.toml`) are a list of `[[rule]]` tables.
 //! Parsing is strict: unknown keys (top-level or inside a rule, except under `params`) and

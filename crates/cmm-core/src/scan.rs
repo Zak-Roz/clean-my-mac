@@ -1,8 +1,8 @@
-//! Scan orchestration (owned by S1).
+//! Scan orchestration.
 //!
 //! [`scan_at`] runs the selected rules in parallel (rayon), turns every failing (or panicking)
 //! detector into a [`ScanError`], adds `requires_quit` blockers, drops findings below
-//! `min_finding_bytes` — or the rule's own `params.min_bytes` when it sets one (safety fix 4) —
+//! `min_finding_bytes` — or the rule's own `params.min_bytes` when it sets one (safeguard 4) —
 //! (`Command` and `InfoOnly` findings are exempt), removes findings covered by an
 //! unblocked ancestor finding (ARCHITECTURE.md §10) and sorts by allocated bytes.
 
@@ -64,8 +64,8 @@ pub fn scan_at(
 }
 
 /// Whether `opts` selects every enabled rule (no id and no category filter). Only such scans are
-/// recorded to history (contract v2): growth compares whole scans, so a filtered one would make
-/// every other finding look like it disappeared.
+/// recorded to history: growth compares whole scans, so a filtered one would make every other
+/// finding look like it disappeared.
 pub fn is_full_scan(opts: &ScanOptions) -> bool {
     opts.rule_ids.is_none() && opts.categories.is_none()
 }
@@ -155,8 +155,8 @@ pub fn min_bytes_for(rule: &RuleDef, config: &Config) -> u64 {
     rule.params.get("min_bytes").and_then(serde_json::Value::as_u64).unwrap_or(config.min_finding_bytes)
 }
 
-/// `min_finding_bytes` filter (contract v2): `Command` and `InfoOnly` findings are kept whatever
-/// their size (the zero-byte list of stale worktree entries, a blocked simulator runtime).
+/// `min_finding_bytes` filter: `Command` and `InfoOnly` findings are kept whatever their size (the
+/// zero-byte list of stale worktree entries, a blocked simulator runtime).
 fn above_min_size(f: &Finding, min_bytes: u64) -> bool {
     f.bytes >= min_bytes || matches!(f.action, ActionKind::Command | ActionKind::InfoOnly)
 }

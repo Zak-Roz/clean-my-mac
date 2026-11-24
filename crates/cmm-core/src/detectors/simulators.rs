@@ -1,4 +1,4 @@
-//! `simulator-runtimes` detector — unusable or duplicate simulator runtimes via `xcrun simctl` (owned by S2).
+//! `simulator-runtimes` detector — unusable or duplicate simulator runtimes via `xcrun simctl`.
 //!
 //! `xcrun simctl runtime list -j`: a deletable runtime whose state is not ready/usable, or that
 //! duplicates another runtime's platform + version + build, becomes a `command` finding

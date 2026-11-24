@@ -1,4 +1,4 @@
-//! `redundant-archives` detector — archives whose extracted sibling exists (owned by S2).
+//! `redundant-archives` detector — archives whose extracted sibling exists.
 //!
 //! `X.zip/.tar.gz/.tgz/.tar.bz2/.tar.xz/.tar/.rar/.7z` is redundant when a non-empty sibling `X` or
 //! `X.app` exists. Names are compared after version-token normalization

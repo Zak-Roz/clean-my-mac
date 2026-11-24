@@ -1,4 +1,4 @@
-//! Version-token normalization shared by `versioned-siblings` and `redundant-archives` (owned by S2).
+//! Version-token normalization shared by `versioned-siblings` and `redundant-archives`.
 //!
 //! A *token* is a part of a file name that identifies one version of otherwise the same thing:
 //! dates (`28_01_2025`, `2025-01-28`, `20250128`), timestamps (`2025-06-20T11-00-00-030Z`,

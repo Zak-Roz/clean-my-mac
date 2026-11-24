@@ -1,4 +1,4 @@
-//! `cmm history [--days 30] [--json]` — what grew between scans, and the free-space trend (owned by S3).
+//! `cmm history [--days 30] [--json]` — what grew between scans, and the free-space trend.
 
 use std::path::Path;
 use std::process::ExitCode;

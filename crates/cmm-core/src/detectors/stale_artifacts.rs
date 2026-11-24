@@ -1,4 +1,4 @@
-//! `stale-artifacts` detector — artifact dirs (node_modules, target, ...) of projects untouched for `stale_days` (owned by S2).
+//! `stale-artifacts` detector — artifact dirs (node_modules, target, ...) of projects untouched for `stale_days`.
 //!
 //! One parallel pass over each root:
 //! - never enters artifact dirs (`names`), `.git`, other devices, symlinks or hidden dirs — except

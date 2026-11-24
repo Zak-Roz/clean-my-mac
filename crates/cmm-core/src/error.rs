@@ -1,6 +1,6 @@
-//! Error type shared by all of cmm-core. Owned by the coordinator.
+//! Error type shared by all of cmm-core.
 
-/// Each variant carries a human-readable message; streams map their library errors into these
+/// Each variant carries a human-readable message; modules map their library errors into these
 /// (e.g. `rusqlite::Error` -> `CoreError::History(e.to_string())`).
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {

@@ -1,6 +1,6 @@
 // Pure helpers for clean results: outcome counts and the reasons the core reports when an item
-// changed since the scan (safety fix 1: the backend re-scans before planning and before cleaning,
-// and leaves alone whatever no longer matches what the user picked).
+// changed since the scan (ARCHITECTURE.md §10, safeguard 1: the backend re-scans before planning
+// and before cleaning, and leaves alone whatever no longer matches what the user picked).
 
 import type { CleanItemResult } from "../bindings/CleanItemResult";
 import type { CleanResult } from "../bindings/CleanResult";

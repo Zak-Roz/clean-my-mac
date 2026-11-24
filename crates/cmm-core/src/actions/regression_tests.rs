@@ -1,6 +1,5 @@
-//! Regression tests for the delete-path review (ARCHITECTURE.md §10, "Safety fixes after the
-//! delete-path review") and the re-review after a28953e. Every scenario here lost data before the
-//! fixes; A–D fail on e30b50b, E fails on 8fd1c46, and all pass now.
+//! Regression tests for the cleaning safeguards (ARCHITECTURE.md §10, "Cleaning safeguards").
+//! Every scenario here is one that loses data without them.
 //!
 //! Real `git` repositories in a tempdir "home" (global/system git config ignored), the catalog's
 //! own `dev.git-worktrees` and `downloads.redundant-archives` rules, and a fake Trash folder in
@@ -408,7 +407,7 @@ fn d_untracked_files_hidden_by_config_block_worktree_removal() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// E: a repository-wide `git worktree prune` (re-review follow-up after a28953e)
+// E: a repository-wide `git worktree prune` (safeguard 3)
 
 /// Scan: one stale entry (its folder deleted by hand) and a worktree on an external disk with a
 /// detached commit and staged work. The disk is ejected after the user picked the stale-entries

@@ -1,6 +1,6 @@
-//! Read-only external tool invocation for the S2 detectors (owned by S2).
+//! Read-only external tool invocation for the detectors.
 //!
-//! A thin wrapper over the one timed runner, [`crate::process::run_with_timeout`] (contract v2):
+//! A thin wrapper over the one timed runner, [`crate::process::run_with_timeout`]:
 //! tools are resolved to absolute paths in [`crate::process::TOOL_DIRS`], stdin is closed, output
 //! is captured as text, the process group is killed after [`TIMEOUT`], and a missing tool is a
 //! `CoreError::Command` (never a panic). `GIT_OPTIONAL_LOCKS=0` keeps `git status` from rewriting

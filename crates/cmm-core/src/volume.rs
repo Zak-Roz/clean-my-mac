@@ -1,4 +1,4 @@
-//! Volume capacity, swap, Trash and the Full Disk Access probe (owned by S1).
+//! Volume capacity, swap, Trash and the Full Disk Access probe.
 
 use std::ffi::{CString, c_void};
 use std::os::unix::ffi::OsStrExt;

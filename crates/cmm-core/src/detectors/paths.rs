@@ -1,4 +1,4 @@
-//! `paths` detector — one finding per existing match of the rule's root globs (owned by S1).
+//! `paths` detector — one finding per existing match of the rule's root globs.
 //!
 //! A match that is itself a symlink is skipped: trashing the link would free nothing.
 

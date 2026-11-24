@@ -1,4 +1,4 @@
-//! Allocated-size measurement (owned by S1).
+//! Allocated-size measurement.
 //!
 //! [`Sizer::size_of`] walks a tree in parallel (rayon), reading each directory's entries and their
 //! attributes with one `getattrlistbulk(2)` call per batch (falling back to `read_dir` + `lstat`):

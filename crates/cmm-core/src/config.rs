@@ -1,4 +1,4 @@
-//! User configuration (`data_dir/config.toml`). Owned by the coordinator.
+//! User configuration (`data_dir/config.toml`).
 
 use std::path::{Path, PathBuf};
 

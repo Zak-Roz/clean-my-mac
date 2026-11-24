@@ -1,6 +1,6 @@
 # clean-my-mac desktop
 
-Tauri 2 + React 19 + Vite + TypeScript. Contract: `docs/ARCHITECTURE.md` §7.
+Tauri 2 + React 19 + Vite + TypeScript. Architecture: `docs/ARCHITECTURE.md` §7.
 
 ```bash
 corepack pnpm --filter desktop dev:mock      # browser UI on :1420 with mock data, no Tauri

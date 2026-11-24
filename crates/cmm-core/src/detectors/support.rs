@@ -1,5 +1,5 @@
-//! Small helpers shared by the S2 detectors: rule params, directory listing and pruned walks,
-//! timestamps (owned by S2).
+//! Small helpers shared by the detectors: rule params, directory listing and pruned walks,
+//! timestamps.
 
 use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
@@ -13,8 +13,8 @@ use crate::rules::expand_roots;
 use crate::scan::ScanContext;
 
 /// Runs `per_root` on every existing root of `rule`. A failing root never hides the others: while
-/// at least one root succeeded, each failure is reported through [`ScanContext::warn`] (contract
-/// v2); if every root failed, the first error is returned (the rule fails) and the rest are warned.
+/// at least one root succeeded, each failure is reported through [`ScanContext::warn`]; if every
+/// root failed, the first error is returned (the rule fails) and the rest are warned.
 pub fn for_each_root(
     rule: &RuleDef,
     ctx: &ScanContext,

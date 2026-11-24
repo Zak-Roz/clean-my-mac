@@ -6,14 +6,15 @@
 //! The daily background scan (LaunchAgent) is installed and removed only through `agent_install` /
 //! `agent_uninstall`, i.e. when the user flips the Settings toggle — never automatically.
 //!
-//! The last full scan is persisted to `data_dir/last-report.json` (contract v2): written after each
-//! full scan and after a real clean prunes it, loaded at startup; a missing or unreadable file just
-//! means "no scan yet".
+//! The last full scan is persisted to `data_dir/last-report.json`: written after each full scan and
+//! after a real clean prunes it, loaded at startup; a missing or unreadable file just means "no scan
+//! yet".
 //!
-//! The stored report is for display and selection only (safety fix 1): `plan_clean` and
-//! `execute_clean` re-scan the rules of the selected findings and act only on findings that are
-//! still exactly what the user picked (`actions::plan_fresh` / `actions::execute_fresh`). A real
-//! clean is refused when the history database (audit log) cannot be opened (safety fix 5).
+//! The stored report is for display and selection only (ARCHITECTURE.md §10, safeguard 1):
+//! `plan_clean` and `execute_clean` re-scan the rules of the selected findings and act only on
+//! findings that are still exactly what the user picked (`actions::plan_fresh` /
+//! `actions::execute_fresh`). A real clean is refused when the history database (audit log) cannot
+//! be opened (safeguard 5).
 //!
 //! Everything that touches the disk or SQLite runs on a blocking thread so the webview never stalls.
 
@@ -223,8 +224,8 @@ fn run_scan(app: &AppHandle, opts: &ScanOptions) -> Result<ScanReport, String> {
         let report = cmm_core::scan(&rules, opts, &state.config, &|progress| {
             let _ = app.emit(SCAN_PROGRESS_EVENT, progress);
         });
-        // History compares whole scans, so only unfiltered ones are recorded (contract v2). It is
-        // a nice-to-have: a failure here must not lose the scan.
+        // History compares whole scans, so only unfiltered ones are recorded. It is a
+        // nice-to-have: a failure here must not lose the scan.
         if cmm_core::scan::is_full_scan(opts) {
             if let Err(e) = state.with_history(|h| h.record_scan(&report)) {
                 eprintln!("cmm: scan not recorded to history: {e}");
@@ -319,8 +320,8 @@ pub async fn reveal_in_finder(path: String) -> Result<(), String> {
     .map_err(join_err)?
 }
 
-/// Opens `~/.Trash` in Finder (contract v2: there is no "Empty Trash" action; emptying it would
-/// also erase unrelated files, so the user does that in Finder).
+/// Opens `~/.Trash` in Finder. There is no "Empty Trash" action: emptying it would also erase
+/// unrelated files, so the user does that in Finder.
 #[tauri::command]
 pub async fn reveal_trash() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| {

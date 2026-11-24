@@ -1,4 +1,4 @@
-//! `docker` detector — reclaimable space from `docker system df` (owned by S2).
+//! `docker` detector — reclaimable space from `docker system df`.
 //!
 //! Docker running: one `command` finding `["docker", "system", "prune", "-f"]` (never `-a`, never
 //! volumes) sized from what that prune removes: stopped containers, build cache and dangling

@@ -1,5 +1,4 @@
-//! Clean planning and execution (owned by S3). See ARCHITECTURE.md §6 and §10 ("Safety fixes
-//! after the delete-path review").
+//! Clean planning and execution. See ARCHITECTURE.md §6 and §10 ("Cleaning safeguards").
 //!
 //! **Never act on a stored report.** [`execute_fresh`] re-runs the scan for the rules of the
 //! requested findings and acts only on findings that are still there with the same id, action,
@@ -107,7 +106,7 @@ impl ExecuteEnv {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Fresh scan: never act on a stored report (safety fix 1)
+// Fresh scan: never act on a stored report (safeguard 1)
 
 /// Plans `req` against a **fresh** scan of the rules behind the requested findings (see the module
 /// docs). `selected_from` is the report the user picked the ids from; an id that is not in it is
@@ -148,14 +147,14 @@ pub fn plan_fresh_with(
     Ok(plan)
 }
 
-/// Re-scans, re-validates and executes `req` against the real system (safety fix 1): only findings
+/// Re-scans, re-validates and executes `req` against the real system (safeguard 1): only findings
 /// that a fresh scan still reports with the same id, action, path and argv, without blockers and
 /// (except `Command` findings) with the same file-vs-folder kind and a size within
 /// `max(10 %, 10 MiB)`, are acted on; the rest are `Skipped` ("no longer matches the scan (…)").
 /// `selected_from` is the report the user picked the ids from (for display and selection only).
 ///
 /// A real clean (`dry_run == false`) without `history` is refused: every item is `Skipped` with
-/// [`NO_AUDIT_LOG`] and nothing is scanned or changed (safety fix 5).
+/// [`NO_AUDIT_LOG`] and nothing is scanned or changed (safeguard 5).
 pub fn execute_fresh(
     rules: &[RuleDef],
     selected_from: &ScanReport,
@@ -732,7 +731,7 @@ fn ensure_not_running(env: &ExecuteEnv, rule: &RuleDef) -> Result<(), String> {
     if running.is_empty() { Ok(()) } else { Err(format!("{} is running — quit it first", running.join(", "))) }
 }
 
-/// A linked worktree, re-checked right before acting (safety fix 3):
+/// A linked worktree, re-checked right before acting (safeguard 3):
 /// 1. the argv is exactly `git -C <repo> worktree remove <the finding's path>`;
 /// 2. the folder has a `.git` **file** whose admin dir is `<repo>/.git/worktrees/<id>` and points back;
 /// 3. not locked, no `modules/` in the admin dir, clean `git status` (all untracked files, all

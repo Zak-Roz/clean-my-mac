@@ -1,4 +1,4 @@
-//! Detector trait, registry and shared helpers (owned by S1; individual detectors per §9).
+//! Detector trait, registry and shared helpers; one module per detector.
 
 use std::path::Path;
 
