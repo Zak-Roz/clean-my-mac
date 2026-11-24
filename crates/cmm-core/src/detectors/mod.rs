@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
+
 use crate::error::CoreError;
 use crate::model::{DetectorKind, Finding, Risk, RuleDef};
 use crate::scan::ScanContext;
@@ -66,10 +68,34 @@ pub fn make_finding(rule: &RuleDef, key: &str, path: Option<&Path>, size: &SizeI
     }
 }
 
+/// Whole days between `then` and `now` (0 if `then` is in the future).
+pub fn age_days(now: DateTime<Utc>, then: DateTime<Utc>) -> i64 {
+    (now - then).num_days().max(0)
+}
+
+/// "today", "1 day ago", "143 days ago" — for deterministic `Finding::reason` texts.
+pub fn describe_age(days: i64) -> String {
+    match days {
+        ..=0 => String::from("today"),
+        1 => String::from("1 day ago"),
+        n => format!("{n} days ago"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rules::builtin_rules;
+
+    #[test]
+    fn ages_are_whole_days() {
+        let now = DateTime::parse_from_rfc3339("2026-11-24T10:00:00Z").unwrap().to_utc();
+        assert_eq!(age_days(now, now - chrono::Duration::hours(47)), 1);
+        assert_eq!(age_days(now, now + chrono::Duration::days(3)), 0);
+        assert_eq!(describe_age(0), "today");
+        assert_eq!(describe_age(1), "1 day ago");
+        assert_eq!(describe_age(143), "143 days ago");
+    }
 
     #[test]
     fn make_finding_id_and_defaults() {
