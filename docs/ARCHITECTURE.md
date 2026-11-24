@@ -284,6 +284,20 @@ actions(id INTEGER PK, at TEXT, finding_id TEXT, path TEXT, mode TEXT, bytes INT
 Anyone may append dependencies to a crate's `Cargo.toml`. Touching another stream's files is a merge
 conflict waiting to happen — report the need instead.
 
+## 10. Decisions log (accepted after the skeleton, 5ce98de)
+
+- TOML catalog keys are snake_case (`requires_quit`); the model keeps camelCase via `#[serde(alias)]`.
+- Unit enums derive `Copy, PartialEq, Eq, Hash`; `ScanOptions` is `Default` + `#[serde(default)]`.
+- `Finding::add_blocker(msg)` pushes a blocker **and** clears `selected_by_default` — always use it.
+- `CleanPlan` is a serialized/TS type (frontend uses it for `plan_clean`).
+- `Config::load()` never fails (falls back to defaults); `Config::load_from(path)` is strict. Helpers `config::home_dir()`, `config::default_data_dir()`.
+- `load_rules(rules_d_dir)` takes the `rules.d` directory itself: callers pass `config.data_dir.join("rules.d")`.
+- `scan()` adds "X is running" blockers from `requires_quit`; a failing rule becomes `ScanError { path: rule_id }`.
+- **S1 adds `scan_at(home: &Path, …)`** with the same signature as `scan` plus `home`; `scan()` delegates with the real home. All scan tests use `scan_at` on a tempdir.
+- u64 is emitted as TS `number` (`TS_RS_LARGE_INT=number`); bindings regenerate on any `cargo test`. Never write a literal `*/` inside `///` comments in `model.rs` (breaks the generated JSDoc).
+- Aerial wallpaper videos on this macOS version live **inside** home: `~/Library/Application Support/com.apple.wallpaper/aerials/videos` (often tens of GB) — a `paths` rule, review, trash.
+- Run pnpm as `corepack pnpm …` (global pnpm shim is broken on this machine); `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` for non-interactive runs.
+
 Quality bar for every stream: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace`; desktop also `pnpm -w lint` and `pnpm -w typecheck`. Filesystem tests use
 `tempfile` fixtures — **never** touch the real home directory in tests.
