@@ -234,6 +234,7 @@ mod tests {
             requires_quit: vec![],
             regenerates: false,
             enabled: true,
+            browse_only: false,
         }
     }
 

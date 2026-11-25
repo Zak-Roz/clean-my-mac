@@ -5,6 +5,7 @@ pub mod agent;
 pub mod config;
 pub mod detectors;
 pub mod error;
+pub mod filemeta;
 pub mod guard;
 pub mod history;
 pub mod model;

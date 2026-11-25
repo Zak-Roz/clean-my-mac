@@ -33,6 +33,8 @@ const RULE_KEYS: &[&str] = &[
     "requiresQuit",
     "regenerates",
     "enabled",
+    "browse_only",
+    "browseOnly",
 ];
 
 /// One `[[rule]]` entry of a file: a full rule or an enable/disable toggle of an existing one.

@@ -15,7 +15,7 @@ import { CheckCircleIcon, InfoIcon, MinusCircleIcon, TrashIcon, WarningIcon, XCi
 import { ShowTrashButton } from "../components/trash";
 import { Button, Callout, cx, RiskBadge, Spinner } from "../components/ui";
 import { isStale, isUnaudited, itemMessage, outcomeCounts, staleWarnings } from "../lib/clean";
-import { actionDescription, doneDescription, isPermanentAction, isSelectable } from "../lib/findings";
+import { actionDescription, doneDescription, isPermanentAction } from "../lib/findings";
 import { errorMessage, formatBytes, formatCount, tildify } from "../lib/format";
 import { useApp } from "../state";
 
@@ -41,11 +41,10 @@ export function ConfirmDialog() {
 }
 
 function ConfirmContent({ onClose }: { onClose: () => void }) {
-  const { report, selection, applyCleanResult } = useApp();
+  const { confirmIds, applyCleanResult } = useApp();
   // Freeze the request when the sheet opens; selection changes underneath must not alter it.
-  const [ids] = useState(() =>
-    (report?.findings ?? []).filter((f) => selection.has(f.id) && isSelectable(f)).map((f) => f.id),
-  );
+  // The ids come from the Findings selection or the Downloads tab (`openConfirm`).
+  const [ids] = useState(() => confirmIds ?? []);
   const [mode, setMode] = useState<CleanMode>("trash");
   const [phase, setPhase] = useState<Phase>({ kind: "planning" });
   const [items, setItems] = useState<ReadonlyMap<string, CleanItemResult>>(new Map());

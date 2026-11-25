@@ -71,13 +71,23 @@ pub fn is_full_scan(opts: &ScanOptions) -> bool {
 }
 
 /// The rules `opts` selects: enabled, and matching the id / category filters when given.
+/// Browse-only rules ([`RuleDef::browse_only`], the Downloads tab) are selected only when
+/// `opts.rule_ids` names them: never by a default or a category scan.
 pub fn select_rules<'r>(rules: &'r [RuleDef], opts: &ScanOptions) -> Vec<&'r RuleDef> {
     rules
         .iter()
         .filter(|r| r.enabled)
+        .filter(|r| !r.browse_only || opts.rule_ids.as_ref().is_some_and(|ids| ids.contains(&r.id)))
         .filter(|r| opts.rule_ids.as_ref().is_none_or(|ids| ids.contains(&r.id)))
         .filter(|r| opts.categories.as_ref().is_none_or(|cats| cats.contains(&r.category)))
         .collect()
+}
+
+/// Whether `opts` selects at least one rule and only browse-only ones (the Downloads tab's scan).
+/// The app keeps such a report apart from the last full scan.
+pub fn is_browse_scan(rules: &[RuleDef], opts: &ScanOptions) -> bool {
+    let selected = select_rules(rules, opts);
+    !selected.is_empty() && selected.iter().all(|r| r.browse_only)
 }
 
 pub(crate) fn scan_with(
@@ -244,6 +254,7 @@ mod tests {
             requires_quit: vec![],
             regenerates: true,
             enabled: true,
+            browse_only: false,
         }
     }
 
@@ -275,6 +286,7 @@ mod tests {
             selected_by_default: false,
             blockers: vec![],
             group: None,
+            meta: None,
         };
         if blocked {
             f.add_blocker("Uncommitted changes in worktree");
@@ -419,6 +431,51 @@ mod tests {
         assert_eq!(run(ScanOptions { rule_ids: Some(vec!["rule.b".into()]), categories: None }), vec!["rule.b"]);
         assert_eq!(run(ScanOptions { rule_ids: None, categories: Some(vec![Category::DevArtifacts]) }), vec!["rule.a"]);
         assert_eq!(run(ScanOptions::default()).len(), 2);
+    }
+
+    #[test]
+    fn browse_only_rules_run_only_when_named() {
+        let home = tempfile::tempdir().unwrap();
+        write(&home.path().join("Downloads/a.bin"), MIB);
+        write(&home.path().join("cache/blob"), MIB);
+        let mut browse = rule("downloads.browse", &["~/Downloads"]);
+        browse.browse_only = true;
+        browse.detector = DetectorKind::Entries;
+        browse.category = Category::Downloads;
+        browse.params = serde_json::json!({ "min_bytes": 0 });
+        let mut cache = rule("cache.x", &["~/cache"]);
+        cache.category = Category::Downloads;
+        let rules = vec![browse, cache];
+        let run = |opts: ScanOptions| {
+            let report = scan_at(home.path(), &rules, &opts, &config(0), &|_| {});
+            report.findings.into_iter().map(|f| f.rule_id).collect::<Vec<_>>()
+        };
+        assert_eq!(run(ScanOptions::default()), vec!["cache.x"], "a default scan skips browse-only rules");
+        let downloads = ScanOptions { rule_ids: None, categories: Some(vec![Category::Downloads]) };
+        assert_eq!(run(downloads.clone()), vec!["cache.x"], "so does a category scan");
+        let named = ScanOptions { rule_ids: Some(vec!["downloads.browse".into()]), categories: None };
+        assert_eq!(run(named.clone()), vec!["downloads.browse"]);
+
+        assert!(is_browse_scan(&rules, &named));
+        assert!(!is_browse_scan(&rules, &ScanOptions::default()));
+        assert!(!is_browse_scan(&rules, &downloads));
+        let both = ScanOptions { rule_ids: Some(vec!["downloads.browse".into(), "cache.x".into()]), categories: None };
+        assert!(!is_browse_scan(&rules, &both), "a mixed scan is not a browse scan");
+        assert!(!is_browse_scan(&rules, &ScanOptions { rule_ids: Some(vec![]), categories: None }));
+    }
+
+    #[test]
+    fn the_builtin_catalog_keeps_downloads_browse_out_of_default_scans() {
+        let rules = crate::rules::builtin_rules().unwrap();
+        let browse = rules.iter().find(|r| r.id == "downloads.browse").expect("downloads.browse exists");
+        assert!(browse.browse_only && browse.enabled);
+        assert_eq!(browse.detector, DetectorKind::Entries);
+        assert_eq!(min_bytes_for(browse, &config(50 * MIB as u64)), 0, "every entry is listed");
+        let selected = |opts: &ScanOptions| select_rules(&rules, opts).iter().any(|r| r.id == "downloads.browse");
+        assert!(!selected(&ScanOptions::default()));
+        assert!(!selected(&ScanOptions { rule_ids: None, categories: Some(vec![Category::Downloads]) }));
+        assert!(selected(&ScanOptions { rule_ids: Some(vec!["downloads.browse".into()]), categories: None }));
+        assert_eq!(rules.iter().filter(|r| r.browse_only).count(), 1, "only the Downloads tab's rule");
     }
 
     #[test]

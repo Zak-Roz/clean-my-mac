@@ -49,6 +49,7 @@ fn rule(id: &str, roots: &[&str], action: ActionKind, requires_quit: &[&str]) ->
         requires_quit: requires_quit.iter().map(|s| s.to_string()).collect(),
         regenerates: true,
         enabled: true,
+        browse_only: false,
     }
 }
 
@@ -130,6 +131,7 @@ fn finding(rule_id: &str, path: Option<&Path>, bytes: u64, action: ActionKind) -
         selected_by_default: true,
         blockers: vec![],
         group: None,
+        meta: None,
     }
 }
 

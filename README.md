@@ -120,7 +120,8 @@ Two things to know:
 
 **App.** Overview (free space, swap, Trash, growth since earlier scans) → **Scan** → Findings
 (grouped by category, with risk, size and the reason for each) → tick items → Confirm (Trash or
-Delete) → History.
+Delete) → History. The **Downloads** tab lists everything in `~/Downloads` with previews, sorted by size,
+date added or when it was last opened, and moves what you pick to the Trash through the same Confirm step.
 
 **CLI.**
 

@@ -13,6 +13,7 @@ pub mod archives;
 #[cfg(test)]
 mod catalog_tests;
 pub mod docker;
+pub mod entries;
 pub mod external;
 pub mod git_worktrees;
 pub mod installers;
@@ -41,6 +42,7 @@ pub fn detector_for(kind: DetectorKind) -> &'static dyn Detector {
         DetectorKind::RedundantArchives => &archives::RedundantArchivesDetector,
         DetectorKind::SimulatorRuntimes => &simulators::SimulatorRuntimesDetector,
         DetectorKind::Docker => &docker::DockerDetector,
+        DetectorKind::Entries => &entries::EntriesDetector,
     }
 }
 
@@ -73,6 +75,7 @@ pub fn make_finding(rule: &RuleDef, key: &str, path: Option<&Path>, size: &SizeI
         selected_by_default: rule.risk == Risk::Safe && blockers.is_empty(),
         blockers,
         group: None,
+        meta: None,
     }
 }
 
@@ -158,6 +161,7 @@ mod tests {
             RedundantArchives,
             SimulatorRuntimes,
             Docker,
+            Entries,
         ] {
             let _ = detector_for(kind);
         }

@@ -43,7 +43,7 @@ pub enum Risk { Safe, Review, Manual }
 
 pub enum Category { Downloads, DevArtifacts, Worktrees, PackageCaches, AiTools, Xcode, Containers, AppCaches, System, LargeFiles }
 
-pub enum DetectorKind { Paths, OlderThan, StaleArtifacts, VersionedSiblings, GitWorktrees, Installers, RedundantArchives, SimulatorRuntimes, Docker }
+pub enum DetectorKind { Paths, OlderThan, StaleArtifacts, VersionedSiblings, GitWorktrees, Installers, RedundantArchives, SimulatorRuntimes, Docker, Entries }
 
 pub enum ActionKind { Trash, Delete, GitWorktreeRemove, Command, InfoOnly }
 
@@ -60,6 +60,7 @@ pub struct RuleDef {
     pub requires_quit: Vec<String>, // process names that must NOT be running (e.g. "Claude", "Docker")
     pub regenerates: bool,          // the data comes back on its own (caches)
     pub enabled: bool,              // default true
+    pub browse_only: bool,          // serde default false; TOML `browse_only`. Runs only when ScanOptions.rule_ids names it (§10 "Browse-only rules")
 }
 
 pub struct Finding {
@@ -80,6 +81,17 @@ pub struct Finding {
     pub selected_by_default: bool,  // only Risk::Safe with no blockers
     pub blockers: Vec<String>,      // "Claude is running", "Uncommitted changes in worktree"
     pub group: Option<String>,      // set key for versioned siblings / worktrees of one repo
+    pub meta: Option<FileMeta>,     // serde default None; set by the `entries` detector only
+}
+
+pub struct FileMeta {               // filemeta.rs: Spotlight (MDItemCopyAttribute) with an lstat fallback
+    pub date_added: Option<DateTime<Utc>>,  // kMDItemDateAdded, else birth time
+    pub last_opened: Option<DateTime<Utc>>, // kMDItemLastUsedDate, trusted only when `indexed` or kMDItemUsedDates exists
+    pub indexed: bool,                      // kMDItemDateAdded present: no last_opened then means "never opened", not "unknown"
+    pub created: Option<DateTime<Utc>>,     // lstat birth time of the item itself
+    pub modified: Option<DateTime<Utc>>,    // lstat mtime of the item itself
+    pub content_type: Option<String>,       // kMDItemContentType (UTI)
+    pub where_from: Option<String>,         // first kMDItemWhereFroms entry
 }
 
 pub struct VolumeInfo {
@@ -165,6 +177,12 @@ impl ScanContext<'_> { pub fn warn(&self, path, message); } // non-fatal problem
 pub fn scan(rules: &[RuleDef], opts: &ScanOptions, config: &Config, on_progress: &(dyn Fn(ScanProgress) + Sync)) -> ScanReport;
 pub fn scan_at(home: &Path, /* same as scan */) -> ScanReport; // scan() delegates with the real home
 // rules run in parallel (rayon); a failing rule becomes ScanError, never aborts the scan.
+pub fn select_rules(rules, opts) -> Vec<&RuleDef>;  // enabled + filters; browse-only rules only when rule_ids names them
+pub fn is_full_scan(opts) -> bool;                  // no id and no category filter (recorded to history)
+pub fn is_browse_scan(rules, opts) -> bool;         // selects ≥ 1 rule, all browse-only (the app keeps it apart)
+
+// filemeta.rs
+pub fn read(path: &Path) -> FileMeta;              // never fails; never follows a symlink
 
 // detectors/mod.rs
 pub trait Detector: Send + Sync {
@@ -222,6 +240,7 @@ roots = [
 action = "trash"
 requires_quit = ["Claude"]
 regenerates = true
+browse_only = false   # optional; true = only scanned when named by id (the Downloads tab's rule)
 
 [rule.params]   # optional, detector-specific
 ```
@@ -239,6 +258,10 @@ Detector semantics:
 | `redundant-archives` | dirs | — | `X.zip/.tar.gz/.rar/.7z` when sibling `X`/`X.app` exists |
 | `simulator-runtimes` | — | — | `xcrun simctl runtime list -j`: unusable or duplicate runtimes → `command` |
 | `docker` | — | — | `docker system df`: reclaimable space → `command ["docker","system","prune","-f"]`; info-only when Docker is not running |
+| `entries` | dirs (`~/Downloads`) | `min_bytes?` | one per top-level entry (file, folder sized as one unit, bundle, symlink as the link itself; never followed); `.DS_Store`, `.localized`, `Icon\r` skipped; `.download`/`.crdownload`/`.part`/`.partial`/`.opdownload` get a blocker; `meta` = `filemeta::read`, `last_used` = newest of mtime inside, last opened and date added |
+
+`downloads.browse` (category downloads, risk manual, action trash, `browse_only = true`, `min_bytes = 0`) is
+the only `entries` rule: the desktop app's Downloads tab.
 
 ## 5. CLI (`cmm`)
 
@@ -252,6 +275,8 @@ cmm agent  install [--at 10:00] | uninstall | status      # daily background sca
 ```
 
 The CLI re-runs a scan (scoped to the requested rules) before `clean`, so it never acts on stale data.
+Browse-only rules appear in `cmm scan` only with `--rule <id>` (e.g. `--rule downloads.browse` lists all of
+`~/Downloads`); `cmm clean --rule downloads.browse` never bulk-selects them (manual risk), `--id` does.
 `cmm scan` records the report to history unless `--no-record` (filtered scans are never recorded).
 
 ## 6. Safety invariants (non-negotiable)
@@ -289,6 +314,8 @@ history_growth(days: u32) -> Vec<GrowthItem>
 history_free_space(days: u32) -> Vec<FreeSpacePoint>
 reveal_in_finder(path: String)
 reveal_trash()                                       // opens ~/.Trash in Finder
+thumbnail(path: String, size: u32) -> PNG bytes      // QLThumbnailGenerator, raw IPC response; ~/Downloads items only
+quick_look(path: String) -> bool                     // opens/closes the system Quick Look panel (qlmanage -p); ~/Downloads only
 open_full_disk_access_settings()
 monitor_settings() -> MonitorSettings                // the monitoring fields of config.toml
 agent_status() / agent_install() / agent_uninstall() -> AgentStatus   // Settings toggle only
@@ -297,12 +324,27 @@ agent_status() / agent_install() / agent_uninstall() -> AgentStatus   // Setting
 Scans started from the menu bar (`src-tauri/src/tray.rs`) also emit "scan://started", "scan://finished"
 (ScanReport) or "scan://failed".
 
+`start_scan` with options that select only browse-only rules (`scan::is_browse_scan`; the Downloads tab sends
+`rule_ids = ["downloads.browse"]`) keeps the result as the **browse report**: in memory only, not recorded, not
+persisted, not `last_report()`, no progress events, no menu bar "Scanning…", its own busy flag (it may run next
+to a full scan). `plan_clean` / `execute_clean` look the requested ids up in the last full scan **plus** the
+browse report and then go through `plan_fresh` / `execute_fresh` unchanged; a real clean prunes done items from
+both. `thumbnail` and `quick_look` (`src-tauri/src/preview.rs`) accept a path only when its canonical location
+(symlinks and `..` resolved) is strictly inside `~/Downloads`; Tauri's asset-protocol scope is not used.
+
 Screens: **Overview** (free-space gauge, swap, Trash, last scan, top growth, free-space trend) →
 **Findings** (grouped by category, risk badge, checkbox, size, reason, blockers, reveal in Finder) →
 **Confirm** (summary, Trash vs Delete, "Trash doesn't free space until emptied") → **History**, plus
-**Settings** (monitoring thresholds, background-scan toggle). The menu bar item shows free space and
+**Downloads** (every top-level item of `~/Downloads`: QuickLook thumbnail, kind, size, date added, last
+opened / "Never opened" / "Unknown", source domain, badges when the main scan's installer, extracted-archive
+or older-version rules flag the item or something inside it; sort by size, date added, last opened, name;
+filter by kind, "not opened for 30 / 90 / 365 days" and text; click / Shift-click / Select All, Space or the
+eye button for Quick Look; the same Confirm sheet, Move to Trash by default) and **Settings** (monitoring
+thresholds, background-scan toggle). ⌘1–⌘5 switch screens in that order (Overview, Findings, Downloads,
+History, Settings). The menu bar item shows free space and
 turns to a warning state below `low_space_threshold_bytes`.
-Mock mode (`VITE_MOCK=1`) serves `fixtures/sample-report.json` so the UI can be built without a real scan.
+Mock mode (`VITE_MOCK=1`) serves `fixtures/sample-report.json` so the UI can be built without a real scan;
+the Downloads tab gets invented `/Users/you/Downloads/...` entries and generated placeholder thumbnails.
 
 ## 8. Data files (`data_dir`)
 
@@ -329,6 +371,7 @@ Timestamps are fixed-width RFC3339 UTC strings, so they sort chronologically. Ne
 | `cmm-core/src/scan.rs` | scan orchestration: parallel rules, blockers, size threshold, nested findings, sorting |
 | `cmm-core/src/size.rs` | allocated-size measurement (hardlinks once, no symlinks, one device) |
 | `cmm-core/src/volume.rs` | volume capacity, swap, Trash size, Full Disk Access probe |
+| `cmm-core/src/filemeta.rs` | per-item Spotlight metadata (date added, last opened, type, origin) with an `lstat` fallback |
 | `cmm-core/src/process.rs` | running-process snapshot for `requires_quit`; the timed runner and tool resolver for external programs |
 | `cmm-core/src/detectors/` | `Detector` trait, registry and `make_finding`; one module per detector, plus `naming.rs` (version tokens), `support.rs` (shared helpers), `external.rs` (read-only tool calls) and `catalog_tests.rs` (catalog consistency) |
 | `cmm-core/src/guard.rs` | path guard (§6.2) |
@@ -337,8 +380,8 @@ Timestamps are fixed-width RFC3339 UTC strings, so they sort chronologically. Ne
 | `cmm-core/src/monitor.rs` | alerts after a recorded scan (low space, fast growth), de-duplication, notification text |
 | `cmm-core/src/agent.rs` | the background-scan LaunchAgent: install, uninstall, status |
 | `cmm-cli/src/main.rs`, `cmd/` | argument parsing and dispatch; one module per subcommand, shared formatting in `cmd/mod.rs` |
-| `apps/desktop/src-tauri/` | Tauri commands over cmm-core (§7), app state, last-report persistence, menu bar item |
-| `apps/desktop/src/` | React UI: `api.ts` (and `mock.ts` for mock mode), `state.tsx`, pure logic in `lib/`, `screens/`, `components/`, generated `bindings/` |
+| `apps/desktop/src-tauri/` | Tauri commands over cmm-core (§7), app state, last-report persistence, the browse report, menu bar item; `preview.rs`: thumbnails, Quick Look, the Downloads path check |
+| `apps/desktop/src/` | React UI: `api.ts` (and `mock.ts` for mock mode), `state.tsx`, pure logic in `lib/` (`downloads.ts` for the Downloads tab), `screens/`, `components/`, generated `bindings/` |
 | `rules/default.toml` | built-in rule catalog |
 | `fixtures/sample-report.json` | sample `ScanReport` for mock mode (and the screenshots generated from it locally, not committed) and the model round-trip test |
 | `scripts/`, `packaging/`, `.github/workflows/` | install/uninstall, app build and signing, releases, Homebrew cask, CI |
@@ -358,6 +401,8 @@ Timestamps are fixed-width RFC3339 UTC strings, so they sort chronologically. Ne
   path-less findings) is `#[serde(default)]`: a `last-report.json` saved without it still loads, its folder findings
   read as files and are `Skipped` ("changed since the scan: a file → a folder of N files, rescan") until the next
   scan — it fails closed.
+- `Finding.meta` (`FileMeta`) and `RuleDef.browse_only` are `#[serde(default)]`: older reports and rule files load
+  unchanged (`meta: None`, `browse_only: false`).
 - u64 is emitted as TS `number` (`TS_RS_LARGE_INT=number`); bindings regenerate on any `cargo test`. Never write a
   literal `*/` inside `///` comments in `model.rs` (breaks the generated JSDoc).
 
@@ -384,6 +429,28 @@ Timestamps are fixed-width RFC3339 UTC strings, so they sort chronologically. Ne
   them; a rule fails only when every root failed.
 - History records only unfiltered scans (`cmm scan` without `--category`/`--rule`, and the app's full scan): growth
   compares whole scans, so a filtered one would make every other finding look like it disappeared.
+
+### Browse-only rules and the Downloads tab
+
+- A rule with `browse_only = true` is selected only when `ScanOptions.rule_ids` names it (`scan::select_rules`):
+  never by a default scan, a `--category` scan, the background LaunchAgent scan (`cmm scan --quiet --notify`) or
+  the menu bar's Scan Now, so it never reaches history, `last-report.json`, growth, alerts or the Overview totals.
+- There is no Downloads-specific deletion path. Cleaning `downloads.browse` findings is `plan_fresh` /
+  `execute_fresh` like every other finding: fresh re-scan of the rule (named by id, so it runs), identical
+  id / action / path, size and `is_dir` tolerance, guard (`~/Downloads` itself is protected, its entries are not),
+  rule roots, Trash by default, audit log.
+- "Never opened" vs "unknown": Spotlight answers `kMDItemLastUsedDate` even for files it never indexed, with a
+  value derived from the file's own dates. `filemeta` therefore trusts it only for an item with
+  `kMDItemDateAdded` (indexed) or a `kMDItemUsedDates` record; an indexed item without it is "never opened";
+  anything else is "unknown". `date_added` falls back to the birth time. A symlink gets no Spotlight lookup.
+- Unfinished downloads (`.download`, `.crdownload`, `.part`, `.partial`, `.opdownload`) are always blocked, even
+  when abandoned: the browser may still be writing them or hold resume data.
+- Previews never widen Tauri's asset-protocol scope: `thumbnail` returns PNG bytes over IPC, `quick_look` hands the
+  canonical path to `/usr/bin/qlmanage -p`; both refuse anything whose canonical path is not strictly inside
+  `~/Downloads` (so a link in Downloads pointing at `~/.ssh` is refused). Thumbnails are cached in memory only
+  (64 MB, keyed by canonical path, mtime, allocated size and pixel size), never written to disk.
+- Badges on Downloads rows come from the last full scan's `downloads.installers`, `downloads.redundant-archives`
+  and `downloads.versioned-siblings` findings, matched by path (the entry itself, or a finding inside a folder).
 
 ### External tools
 

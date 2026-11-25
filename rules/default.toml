@@ -607,6 +607,21 @@ action = "trash"
 [rule.params]
 days = 30
 
+# Browse-only: never part of a default, category or background scan; the Downloads tab scans it by id.
+[[rule]]
+id = "downloads.browse"
+title = "Everything in Downloads"
+description = "Every file and folder at the top of Downloads, for the Downloads tab to sort, preview and pick from. Removed items are not recreated."
+category = "downloads"
+risk = "manual"
+detector = "entries"
+roots = ["~/Downloads"]
+action = "trash"
+browse_only = true
+
+[rule.params]
+min_bytes = 0
+
 # ─── Development ────────────────────────────────────────────────────────────
 
 [[rule]]

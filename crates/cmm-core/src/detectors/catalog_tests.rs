@@ -21,6 +21,7 @@ fn known_params(kind: DetectorKind) -> &'static [&'static str] {
         DetectorKind::GitWorktrees => &["depth"],
         DetectorKind::Installers => &["days", "extensions", "depth"],
         DetectorKind::RedundantArchives => &["depth"],
+        DetectorKind::Entries => &["min_bytes"],
     }
 }
 
@@ -161,6 +162,7 @@ fn required_coverage() {
         "downloads.installers",
         "downloads.redundant-archives",
         "downloads.old-files",
+        "downloads.browse",
         "apps.updater-caches",
         "apps.spotify.cache",
         "apps.chrome.cache",
@@ -169,7 +171,7 @@ fn required_coverage() {
         assert!(ids.contains(id), "missing rule {id}");
     }
     let kinds: HashSet<DetectorKind> = rules.iter().map(|r| r.detector).collect();
-    assert_eq!(kinds.len(), 9, "every detector kind is used by at least one rule");
+    assert_eq!(kinds.len(), 10, "every detector kind is used by at least one rule");
 }
 
 /// Safeguard 4: the transcripts rule proposes old, large session logs one by one, grouped by

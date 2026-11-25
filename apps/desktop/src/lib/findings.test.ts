@@ -37,6 +37,7 @@ function finding(over: Partial<Finding>): Finding {
     selectedByDefault: false,
     blockers: [],
     group: null,
+    meta: null,
     ...over,
   };
 }

@@ -165,6 +165,7 @@ fn wt_finding(repo: &Path, wt: &Path) -> Finding {
         selected_by_default: false,
         blockers: vec![],
         group: None,
+        meta: None,
     }
 }
 
@@ -470,4 +471,74 @@ fn e_no_repo_wide_prune_runs_even_after_another_worktree_disk_is_ejected() {
     assert!(stale.command.is_none() && !stale.selected_by_default && stale.blockers.is_empty(), "{stale:?}");
     assert!(stale.reason.contains(&*gone.to_string_lossy()), "{}", stale.reason);
     assert!(stale.reason.contains(&format!("`git -C {repo_s} worktree prune`")), "{}", stale.reason);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The Downloads tab: `downloads.browse` findings go through the same fresh-scan executor
+
+/// The catalog's browse-only `downloads.browse` rule, scanned by id like the Downloads tab does,
+/// cleaned through `execute_fresh_with`: the fresh re-scan, the guard, the Trash default and the
+/// audit log apply unchanged, and an unfinished download stays put.
+#[test]
+fn downloads_browse_findings_are_cleaned_through_the_fresh_executor() {
+    let mut fx = fixture();
+    fx.env.rules = crate::rules::builtin_rules().unwrap().into_iter().filter(|r| r.id == "downloads.browse").collect();
+    assert_eq!(fx.env.rules.len(), 1);
+    // Production thresholds: the rule's own `min_bytes = 0` must list even tiny files.
+    fx.config.min_finding_bytes = 50 * 1024 * 1024;
+    let dl = fx.home.join("Downloads");
+    for (name, bytes) in [("report.pdf", 3000), ("photos/a.jpg", 5000), ("photos/b.jpg", 100), ("keep.txt", 10)] {
+        fs::create_dir_all(dl.join(name).parent().unwrap()).unwrap();
+        fs::write(dl.join(name), vec![b'x'; bytes]).unwrap();
+    }
+    fs::write(dl.join("movie.mp4.crdownload"), b"partial").unwrap();
+
+    // A default scan never runs a browse-only rule; naming it does.
+    let default = crate::scan::scan_at(&fx.home, &fx.env.rules, &ScanOptions::default(), &fx.config, &|_| {});
+    assert!(default.findings.is_empty(), "{:?}", default.findings);
+    let opts = ScanOptions { rule_ids: Some(vec!["downloads.browse".into()]), categories: None };
+    let stored = crate::scan::scan_at(&fx.home, &fx.env.rules, &opts, &fx.config, &|_| {});
+    assert!(stored.errors.is_empty(), "{:?}", stored.errors);
+    assert_eq!(stored.findings.len(), 4, "{:#?}", stored.findings);
+
+    let pdf = finding_at(&stored, &dl.join("report.pdf")).clone();
+    let photos = finding_at(&stored, &dl.join("photos")).clone();
+    let partial = finding_at(&stored, &dl.join("movie.mp4.crdownload")).clone();
+    assert!(photos.is_dir && partial.blockers.len() == 1);
+
+    // The plan re-scans too and leaves the blocked download out.
+    let ids = [pdf.id.as_str(), photos.id.as_str(), partial.id.as_str()];
+    let req = CleanRequest { finding_ids: ids.map(String::from).to_vec(), mode: CleanMode::Trash, dry_run: true };
+    let planned = plan_fresh_with(&fx.env, &fx.config, &stored, &req).unwrap();
+    assert_eq!(planned.items.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), [photos.id.as_str(), pdf.id.as_str()]);
+
+    let result = fx.fresh(&stored, &ids, CleanMode::Trash);
+    let outcome = |id: &str| result.items.iter().find(|i| i.finding_id == id).unwrap().outcome;
+    assert_eq!(outcome(&pdf.id), CleanOutcome::Done, "{:?}", result.items);
+    assert_eq!(outcome(&photos.id), CleanOutcome::Done, "{:?}", result.items);
+    assert_eq!(outcome(&partial.id), CleanOutcome::Skipped, "{:?}", result.items);
+    assert!(fx.trash().join("report.pdf").is_file() && fx.trash().join("photos/a.jpg").is_file(), "in the Trash");
+    assert!(!dl.join("report.pdf").exists() && !dl.join("photos").exists());
+    assert!(dl.join("movie.mp4.crdownload").exists() && dl.join("keep.txt").exists(), "the rest stays");
+    assert_eq!(result.freed_bytes, 0, "Trash frees nothing until emptied");
+    assert_eq!(result.moved_to_trash_bytes, pdf.bytes + photos.bytes);
+
+    let audit = fx.history.recent_actions(10).unwrap();
+    let mut logged: Vec<(&str, &str)> = audit.iter().map(|a| (a.finding_id.as_str(), a.mode.as_str())).collect();
+    logged.sort();
+    let mut expected = vec![(pdf.id.as_str(), "trash"), (photos.id.as_str(), "trash")];
+    expected.sort();
+    assert_eq!(logged, expected, "every action is in the audit log");
+
+    // Cleaning the same stored selection again: gone since the scan, so skipped, nothing else moves.
+    let again = fx.fresh(&stored, &[&pdf.id], CleanMode::Trash);
+    assert_eq!(only(&again).outcome, CleanOutcome::Skipped);
+    assert!(only(&again).message.as_deref().unwrap().contains("a new scan no longer finds it"));
+
+    // Delete mode is the explicit choice it is everywhere else.
+    let keep = finding_at(&stored, &dl.join("keep.txt")).clone();
+    let deleted = fx.fresh(&stored, &[&keep.id], CleanMode::Delete);
+    assert_eq!(only(&deleted).outcome, CleanOutcome::Done, "{:?}", deleted.items);
+    assert!(!dl.join("keep.txt").exists() && !fx.trash().join("keep.txt").exists());
+    assert!(dl.is_dir(), "~/Downloads itself is never a target");
 }

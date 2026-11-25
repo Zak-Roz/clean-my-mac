@@ -145,6 +145,27 @@ export const FolderStackIcon = (p: IconProps) => (
   </Icon>
 );
 
+export const DownloadIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M8 2.5v7.25M5.25 7 8 9.75 10.75 7" />
+    <path d="M2.75 10.5v1.75a1 1 0 0 0 1 1h8.5a1 1 0 0 0 1-1V10.5" />
+  </Icon>
+);
+
+export const EyeIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M1.75 8s2.25-4.25 6.25-4.25S14.25 8 14.25 8 12 12.25 8 12.25 1.75 8 1.75 8Z" />
+    <circle cx="8" cy="8" r="1.9" />
+  </Icon>
+);
+
+export const DocumentIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4.25 2.25h4.5l3 3v7.5a1 1 0 0 1-1 1h-6.5a1 1 0 0 1-1-1v-9.5a1 1 0 0 1 1-1Z" />
+    <path d="M8.75 2.25v3h3" />
+  </Icon>
+);
+
 export const TerminalIcon = (p: IconProps) => (
   <Icon {...p}>
     <rect x="2" y="3" width="12" height="10" rx="1.5" />

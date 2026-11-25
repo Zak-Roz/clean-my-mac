@@ -3,6 +3,7 @@
 //! Quit (menu bar or ⌘Q). Clicking the Dock icon shows the window again.
 
 mod commands;
+mod preview;
 mod tray;
 
 use cmm_core::Config;
@@ -11,6 +12,7 @@ use tauri::{Manager, RunEvent, WindowEvent};
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(commands::AppState::new(Config::load()))
+        .manage(preview::PreviewState::default())
         .setup(|app| {
             if let Err(e) = tray::setup(app.handle()) {
                 // The window still works without the menu bar item.
@@ -43,6 +45,8 @@ pub fn run() {
             commands::agent_status,
             commands::agent_install,
             commands::agent_uninstall,
+            preview::thumbnail,
+            preview::quick_look,
         ])
         .build(tauri::generate_context!())
         .expect("error while building clean-my-mac");
