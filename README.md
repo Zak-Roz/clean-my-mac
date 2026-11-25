@@ -120,7 +120,9 @@ Two things to know:
 
 **App.** Overview (free space, swap, Trash, growth since earlier scans) → **Scan** → Findings
 (grouped by category, with risk, size and the reason for each) → tick items → Confirm (Trash or
-Delete) → History.
+Delete) → History. **Storage** ("What's using space?" on the Overview) explains the rest of the
+used space, which no scan rule targets: macOS volumes, apps, `~/Library`, your folders and what
+could not be measured, with drill-down into folders. It only measures; it never deletes.
 
 **CLI.**
 
@@ -132,11 +134,12 @@ cmm clean --id <finding-id> --yes            # move to the Trash
 cmm clean --rule cache.npm --delete --yes    # delete permanently
 cmm history --days 30            # growth by rule/item and the free-space trend
 cmm du ~/Developer --top 20      # quick allocated-size breakdown
+cmm storage --depth 1            # what the whole used space is made of (walks the disk)
 ```
 
 Data lives in `~/Library/Application Support/clean-my-mac`: `history.sqlite` (scans and the
-audit log), `last-report.json`, an optional `config.toml`, and `rules.d/*.toml` to add, override
-or disable rules by id.
+audit log), `last-report.json`, `last-storage.json` (the Storage view's last measurement), an
+optional `config.toml`, and `rules.d/*.toml` to add, override or disable rules by id.
 
 ## Safety model
 
