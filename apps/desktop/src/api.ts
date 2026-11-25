@@ -53,6 +53,10 @@ export interface Api {
   /** Installs the daily background scan (LaunchAgent). Only on an explicit user action. */
   agentInstall(): Promise<AgentStatus>;
   agentUninstall(): Promise<AgentStatus>;
+  /** PNG thumbnail (QuickLook: a preview, else the file's icon) of an item inside ~/Downloads, `size` points square. */
+  thumbnail(path: string, size: number): Promise<Blob>;
+  /** Opens the Quick Look panel for an item inside ~/Downloads, or closes it when it already shows that item. Resolves to whether it is open. */
+  quickLook(path: string): Promise<boolean>;
   onExternalScan(handler: (event: ExternalScanEvent) => void): Promise<UnlistenFn>;
   onNavigate(handler: (screen: string) => void): Promise<UnlistenFn>;
   onScanProgress(handler: (progress: ScanProgress) => void): Promise<UnlistenFn>;
@@ -75,6 +79,9 @@ const tauriApi: Api = {
   agentStatus: () => invoke<AgentStatus>("agent_status"),
   agentInstall: () => invoke<AgentStatus>("agent_install"),
   agentUninstall: () => invoke<AgentStatus>("agent_uninstall"),
+  thumbnail: async (path, size) =>
+    new Blob([await invoke<ArrayBuffer>("thumbnail", { path, size })], { type: "image/png" }),
+  quickLook: (path) => invoke<boolean>("quick_look", { path }),
   onExternalScan: async (handler) => {
     const stops = await Promise.all([
       listen(SCAN_STARTED_EVENT, () => handler({ kind: "started" })),

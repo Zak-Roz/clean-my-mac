@@ -1,4 +1,5 @@
-// App-wide state: volume, last scan report, live scan progress and the current selection.
+// App-wide state: volume, last scan report, live scan progress and the current selection, plus the
+// Downloads tab's own scan and selection (kept apart from the main report, never in its totals).
 // Screens read it through `useApp()`; everything that talks to the backend goes through `api`.
 
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
@@ -7,12 +8,13 @@ import type { CleanResult } from "./bindings/CleanResult";
 import type { ScanProgress } from "./bindings/ScanProgress";
 import type { ScanReport } from "./bindings/ScanReport";
 import type { VolumeInfo } from "./bindings/VolumeInfo";
-import { defaultSelection } from "./lib/findings";
+import { DOWNLOADS_RULE } from "./lib/downloads";
+import { defaultSelection, isSelectable } from "./lib/findings";
 import { errorMessage } from "./lib/format";
 
-export type Screen = "overview" | "findings" | "history" | "settings";
+export type Screen = "overview" | "findings" | "downloads" | "history" | "settings";
 
-const SCREENS: readonly string[] = ["overview", "findings", "history", "settings"] satisfies Screen[];
+const SCREENS: readonly string[] = ["overview", "findings", "downloads", "history", "settings"] satisfies Screen[];
 
 function isScreen(value: string): value is Screen {
   return SCREENS.includes(value);
@@ -36,8 +38,21 @@ interface AppState {
   setSelected: (ids: string[], selected: boolean) => void;
   clearSelection: () => void;
 
+  /** The Downloads tab's scan (`downloads.browse` only): its own report, never the last scan. */
+  downloads: ScanReport | null;
+  downloadsScanning: boolean;
+  downloadsError: string | null;
+  scanDownloads: () => Promise<void>;
+  downloadsSelection: ReadonlySet<string>;
+  setDownloadsSelection: (update: (prev: ReadonlySet<string>) => ReadonlySet<string>) => void;
+
+  /** The finding ids the Confirm sheet is showing; `null` while it is closed. */
+  confirmIds: string[] | null;
   confirmOpen: boolean;
+  /** `true` opens the sheet for the Findings selection; `false` closes it. */
   setConfirmOpen: (open: boolean) => void;
+  /** Opens the sheet for these ids (the Downloads tab). */
+  openConfirm: (ids: string[]) => void;
   /** Called by the Confirm dialog once a real clean finished. */
   applyCleanResult: (result: CleanResult) => Promise<void>;
 
@@ -56,7 +71,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [progress, setProgress] = useState<ScanProgress | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [selection, setSelection] = useState<ReadonlySet<string>>(new Set());
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [downloads, setDownloads] = useState<ScanReport | null>(null);
+  const [downloadsScanning, setDownloadsScanning] = useState(false);
+  const [downloadsError, setDownloadsError] = useState<string | null>(null);
+  const [downloadsSelection, setDownloadsSelectionState] = useState<ReadonlySet<string>>(new Set());
+  const [confirmIds, setConfirmIds] = useState<string[] | null>(null);
   const [dataVersion, setDataVersion] = useState(0);
 
   const refreshVolume = useCallback(async () => {
@@ -131,6 +150,37 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const scanDownloads = useCallback(async () => {
+    setDownloadsScanning(true);
+    setDownloadsError(null);
+    try {
+      const result = await api.startScan({ ruleIds: [DOWNLOADS_RULE], categories: null });
+      setDownloads(result);
+      // Keep the picks that are still there.
+      const ids = new Set(result.findings.map((f) => f.id));
+      setDownloadsSelectionState((prev) => new Set([...prev].filter((id) => ids.has(id))));
+    } catch (e) {
+      setDownloadsError(errorMessage(e));
+    } finally {
+      setDownloadsScanning(false);
+    }
+  }, []);
+
+  const setDownloadsSelection = useCallback(
+    (update: (prev: ReadonlySet<string>) => ReadonlySet<string>) => setDownloadsSelectionState(update),
+    [],
+  );
+
+  const setConfirmOpen = useCallback(
+    (open: boolean) =>
+      setConfirmIds(
+        open ? (report?.findings ?? []).filter((f) => selection.has(f.id) && isSelectable(f)).map((f) => f.id) : null,
+      ),
+    [report, selection],
+  );
+
+  const openConfirm = useCallback((ids: string[]) => setConfirmIds(ids), []);
+
   const setSelected = useCallback((ids: string[], selected: boolean) => {
     setSelection((prev) => {
       const next = new Set(prev);
@@ -149,6 +199,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (result.dryRun) return;
       const done = new Set(result.items.filter((i) => i.outcome === "done").map((i) => i.findingId));
       setSelection((prev) => new Set([...prev].filter((id) => !done.has(id))));
+      setDownloadsSelectionState((prev) => new Set([...prev].filter((id) => !done.has(id))));
+      setDownloads((prev) => (prev ? { ...prev, findings: prev.findings.filter((f) => !done.has(f.id)) } : prev));
       // The backend drops cleaned findings from its stored report; mirror that.
       let next: ScanReport | null = null;
       try {
@@ -178,8 +230,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       selection,
       setSelected,
       clearSelection,
-      confirmOpen,
+      downloads,
+      downloadsScanning,
+      downloadsError,
+      scanDownloads,
+      downloadsSelection,
+      setDownloadsSelection,
+      confirmIds,
+      confirmOpen: confirmIds !== null,
       setConfirmOpen,
+      openConfirm,
       applyCleanResult,
       dataVersion,
     }),
@@ -196,7 +256,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
       selection,
       setSelected,
       clearSelection,
-      confirmOpen,
+      downloads,
+      downloadsScanning,
+      downloadsError,
+      scanDownloads,
+      downloadsSelection,
+      setDownloadsSelection,
+      confirmIds,
+      setConfirmOpen,
+      openConfirm,
       applyCleanResult,
       dataVersion,
     ],

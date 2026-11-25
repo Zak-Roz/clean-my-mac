@@ -5,18 +5,19 @@ import type { ReactNode } from "react";
 import { MOCK } from "../api";
 import { formatBytes, formatDuration, relativeTime } from "../lib/format";
 import { type Screen, useApp } from "../state";
-import { ClockIcon, GaugeIcon, ListIcon, SlidersIcon } from "./icons";
+import { ClockIcon, DownloadIcon, GaugeIcon, ListIcon, SlidersIcon } from "./icons";
 import { Button, Callout, cx, ProgressBar, Spinner } from "./ui";
 
 const NAV: { screen: Screen; label: string; Icon: typeof GaugeIcon; key: string }[] = [
   { screen: "overview", label: "Overview", Icon: GaugeIcon, key: "1" },
   { screen: "findings", label: "Findings", Icon: ListIcon, key: "2" },
-  { screen: "history", label: "History", Icon: ClockIcon, key: "3" },
-  { screen: "settings", label: "Settings", Icon: SlidersIcon, key: "4" },
+  { screen: "downloads", label: "Downloads", Icon: DownloadIcon, key: "3" },
+  { screen: "history", label: "History", Icon: ClockIcon, key: "4" },
+  { screen: "settings", label: "Settings", Icon: SlidersIcon, key: "5" },
 ];
 
 export function Sidebar() {
-  const { screen, setScreen, report, volume, scanning, progress } = useApp();
+  const { screen, setScreen, report, downloads, volume, scanning, progress } = useApp();
   return (
     <nav aria-label="Sections" className="flex w-[196px] shrink-0 flex-col border-r border-line bg-sidebar">
       {/* Room for the traffic lights; drags the window. */}
@@ -40,6 +41,9 @@ export function Sidebar() {
                 <span className="flex-1">{label}</span>
                 {s === "findings" && report && report.findings.length > 0 && (
                   <span className="text-[11px] text-fg-2 tabular-nums">{report.findings.length}</span>
+                )}
+                {s === "downloads" && downloads && downloads.findings.length > 0 && (
+                  <span className="text-[11px] text-fg-2 tabular-nums">{downloads.findings.length}</span>
                 )}
               </button>
             </li>
