@@ -124,7 +124,8 @@ Delete) → History. The **Downloads** tab lists everything in `~/Downloads` wit
 date added or when it was last opened, and moves what you pick to the Trash through the same Confirm step.
 **Storage** ("What's using space?" on the Overview) explains the rest of the used space, which no scan
 rule targets: macOS volumes, apps, `~/Library`, your folders and what could not be measured, with
-drill-down into folders. It only measures; it never deletes.
+drill-down into folders. It only measures; it never deletes. The sidebar lists Overview, Findings,
+Downloads, Storage, History and Settings, in that order, on ⌘1–⌘6.
 
 **CLI.**
 

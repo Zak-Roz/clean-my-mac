@@ -34,7 +34,8 @@ Screenshots are generated locally into `docs/screenshots/`, which is git-ignored
   measurement outside React so it survives screen changes.
 - `src/lib/` — pure logic: risk/selection rules, nested-path de-duplication, grouping, formatting; `downloads.ts`
   for the Downloads tab (kinds, opened state, sorting, filters, ranges, main-scan badges).
-- `src/screens/` — Overview, Findings (+ selection bar), Downloads, Storage, Confirm sheet, History, Settings.
+- `src/screens/` — Overview, Findings (+ selection bar), Downloads, Storage, History, Settings (sidebar order,
+  ⌘1–⌘6), and the Confirm sheet.
 - `src/components/` — window chrome, small UI primitives, hand-rolled SVG charts.
 
 ## Passive monitoring

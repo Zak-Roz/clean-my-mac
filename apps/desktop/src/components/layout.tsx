@@ -8,7 +8,8 @@ import { type Screen, useApp } from "../state";
 import { ClockIcon, DownloadIcon, GaugeIcon, ListIcon, SlidersIcon, StorageIcon } from "./icons";
 import { Button, Callout, cx, ProgressBar, Spinner } from "./ui";
 
-const NAV: { screen: Screen; label: string; Icon: typeof GaugeIcon; key: string }[] = [
+// Sidebar order; `key` is the screen's ⌘ shortcut (App.tsx builds its key map from this list).
+export const NAV: { screen: Screen; label: string; Icon: typeof GaugeIcon; key: string }[] = [
   { screen: "overview", label: "Overview", Icon: GaugeIcon, key: "1" },
   { screen: "findings", label: "Findings", Icon: ListIcon, key: "2" },
   { screen: "downloads", label: "Downloads", Icon: DownloadIcon, key: "3" },

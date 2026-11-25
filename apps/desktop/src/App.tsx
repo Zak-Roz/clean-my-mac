@@ -1,7 +1,7 @@
-// App shell: sidebar + the current screen, the Confirm sheet, and ⌘1–5 navigation.
+// App shell: sidebar + the current screen, the Confirm sheet, and ⌘1–6 navigation.
 
 import { useEffect } from "react";
-import { Sidebar } from "./components/layout";
+import { NAV, Sidebar } from "./components/layout";
 import { TooltipProvider } from "./components/ui";
 import { ConfirmDialog } from "./screens/ConfirmDialog";
 import { Downloads } from "./screens/Downloads";
@@ -12,13 +12,9 @@ import { Settings } from "./screens/Settings";
 import { Storage } from "./screens/Storage";
 import { AppProvider, type Screen, useApp } from "./state";
 
+// ⌘1–⌘6 follow the sidebar (Overview, Findings, Downloads, Storage, History, Settings); ⌘, opens Settings.
 const SHORTCUTS: Record<string, Screen> = {
-  "1": "overview",
-  "2": "findings",
-  "3": "downloads",
-  "4": "storage",
-  "5": "history",
-  "6": "settings",
+  ...Object.fromEntries(NAV.map(({ key, screen }) => [key, screen])),
   ",": "settings",
 };
 
