@@ -48,6 +48,8 @@ enum Command {
     },
     /// Quick allocated-size breakdown of a directory.
     Du(cmd::du::DuArgs),
+    /// What the used space of the startup disk is made of (read-only; walks the whole disk).
+    Storage(cmd::storage::StorageArgs),
     /// Daily background scan (LaunchAgent): install, uninstall, status. Never cleans.
     Agent(cmd::agent::AgentArgs),
 }
@@ -72,6 +74,7 @@ fn run(command: Command) -> Result<ExitCode> {
         }
         Command::History { days, json } => cmd::history::run(days, json),
         Command::Du(args) => cmd::du::run(args),
+        Command::Storage(args) => cmd::storage::run(args),
         Command::Agent(args) => cmd::agent::run(args),
     }
 }
@@ -120,6 +123,20 @@ mod tests {
         }
         let Command::Du(args) = Cli::try_parse_from(["cmm", "du", "."]).unwrap().command else { panic!() };
         assert_eq!((args.depth, args.top), (1, 20));
+    }
+
+    #[test]
+    fn parses_storage() {
+        let Command::Storage(args) = Cli::try_parse_from(["cmm", "storage"]).unwrap().command else { panic!() };
+        assert_eq!((args.json, args.depth, args.top, args.no_findings), (false, 1, 12, false));
+        let Command::Storage(args) =
+            Cli::try_parse_from(["cmm", "storage", "--json", "--depth", "3", "--top", "5", "--no-findings"])
+                .unwrap()
+                .command
+        else {
+            panic!()
+        };
+        assert_eq!((args.json, args.depth, args.top, args.no_findings), (true, 3, 5, true));
     }
 
     #[test]

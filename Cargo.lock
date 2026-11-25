@@ -446,7 +446,6 @@ dependencies = [
  "chrono",
  "clap",
  "cmm-core",
- "rayon",
  "serde",
  "serde_json",
  "tempfile",
