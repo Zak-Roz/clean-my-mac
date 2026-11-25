@@ -97,7 +97,7 @@ impl AppState {
         f(history).map_err(core_err)
     }
 
-    fn last_report_clone(&self) -> Result<Option<ScanReport>, String> {
+    pub(crate) fn last_report_clone(&self) -> Result<Option<ScanReport>, String> {
         Ok(self.last_report.lock().map_err(|e| e.to_string())?.clone())
     }
 
@@ -107,10 +107,10 @@ impl AppState {
 }
 
 /// Clears a busy flag when dropped, so a panic or early return never leaves it stuck.
-struct BusyGuard<'a>(&'a AtomicBool);
+pub(crate) struct BusyGuard<'a>(&'a AtomicBool);
 
 impl<'a> BusyGuard<'a> {
-    fn acquire(flag: &'a AtomicBool, what: &str) -> Result<Self, String> {
+    pub(crate) fn acquire(flag: &'a AtomicBool, what: &str) -> Result<Self, String> {
         if flag.swap(true, Ordering::SeqCst) {
             return Err(format!("{what} is already running"));
         }
@@ -156,7 +156,7 @@ fn refuse_without_history(e: &str) -> String {
     format!("Nothing was cleaned: the audit log can't be written ({e}). Every removal is recorded there first.")
 }
 
-fn join_err(e: tauri::Error) -> String {
+pub(crate) fn join_err(e: tauri::Error) -> String {
     format!("background task failed: {e}")
 }
 
@@ -173,7 +173,7 @@ fn prune_cleaned(report: &mut ScanReport, result: &CleanResult) {
 
 /// `open -R` refuses relative paths with a confusing error and would treat a leading `-` as an
 /// option, so only absolute paths that exist are passed on.
-fn validate_reveal_path(path: &str) -> Result<&Path, String> {
+pub(crate) fn validate_reveal_path(path: &str) -> Result<&Path, String> {
     let p = Path::new(path);
     if !p.is_absolute() {
         return Err(format!("not an absolute path: {path}"));

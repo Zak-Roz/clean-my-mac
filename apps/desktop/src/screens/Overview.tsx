@@ -61,7 +61,7 @@ export function Overview() {
 }
 
 function DiskCard({ volume }: { volume: VolumeInfo | null }) {
-  const { report } = useApp();
+  const { report, setScreen } = useApp();
   if (!volume || volume.totalBytes === 0) {
     return (
       <Card className="h-[148px] animate-pulse">
@@ -89,7 +89,12 @@ function DiskCard({ volume }: { volume: VolumeInfo | null }) {
             <span className="text-[14px] text-fg-2">free of {formatBytes(volume.totalBytes)}</span>
           </div>
         </div>
-        <StatusPill tone={health.tone}>{health.label}</StatusPill>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setScreen("storage")}>
+            What's using space?
+          </Button>
+          <StatusPill tone={health.tone}>{health.label}</StatusPill>
+        </div>
       </div>
       {purgeable !== null && (
         <div className="mt-2 flex items-center gap-1 text-[12px] text-fg-2">
@@ -107,7 +112,13 @@ function DiskCard({ volume }: { volume: VolumeInfo | null }) {
         <CapacityBar
           total={volume.totalBytes}
           segments={[
-            { key: "used", label: report ? "Other used" : "Used", bytes: used - found, color: "var(--neutral-mark)" },
+            {
+              key: "used",
+              label: report ? "Other used" : "Used",
+              bytes: used - found,
+              color: "var(--neutral-mark)",
+              hint: "What no scan rule targets: apps, documents, macOS and more. Storage shows what it is made of.",
+            },
             {
               key: "found",
               label: "Found by last scan",

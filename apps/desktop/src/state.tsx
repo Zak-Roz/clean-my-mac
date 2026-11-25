@@ -10,9 +10,9 @@ import type { VolumeInfo } from "./bindings/VolumeInfo";
 import { defaultSelection } from "./lib/findings";
 import { errorMessage } from "./lib/format";
 
-export type Screen = "overview" | "findings" | "history" | "settings";
+export type Screen = "overview" | "findings" | "storage" | "history" | "settings";
 
-const SCREENS: readonly string[] = ["overview", "findings", "history", "settings"] satisfies Screen[];
+const SCREENS: readonly string[] = ["overview", "findings", "storage", "history", "settings"] satisfies Screen[];
 
 function isScreen(value: string): value is Screen {
   return SCREENS.includes(value);
