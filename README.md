@@ -29,8 +29,9 @@ above trusts this one cask, not the whole tap. You get:
 
 **First launch.** Releases are signed with the project's own certificate but are **not
 notarized** by Apple, so macOS blocks the first launch. Open **System Settings → Privacy &
-Security** and click **Open Anyway** next to the message about clean-my-mac. If macOS also blocks
-`cmm` the first time you run it, allow it there the same way.
+Security** and click **Open Anyway** next to the message about clean-my-mac. Do this before you
+use `cmm`: until then macOS stops it at once, without output (the shell prints `killed`, exit
+status 137). If `cmm` is still stopped after that, allow it in the same place.
 
 **Full Disk Access.** Grant it to the app as described [below](#full-disk-access). Every release is
 signed with the same certificate, so updates keep the grant.
