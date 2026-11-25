@@ -299,10 +299,25 @@ fn is_executable(path: &Path) -> bool {
     path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// Install locations outside home, checked between the home ones (Homebrew on Apple silicon, then
+/// Intel / manual installs).
+const SYSTEM_BIN_DIRS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
+
 /// Where a `cmm` binary may live, in order: next to the running executable (the CLI itself, or a
 /// `cmm` bundled in the app's `Contents/MacOS`), the usual install locations, then `$PATH`.
 /// A Finder-launched app has a minimal `PATH`, so the fixed locations matter.
 pub fn cmm_candidates(home: &Path, current_exe: Option<&Path>, path_var: Option<&OsStr>) -> Vec<PathBuf> {
+    candidates_with(home, current_exe, path_var, &SYSTEM_BIN_DIRS)
+}
+
+/// [`cmm_candidates`] with the install locations outside home given by the caller, so tests do not
+/// depend on what is installed on the machine.
+fn candidates_with(
+    home: &Path,
+    current_exe: Option<&Path>,
+    path_var: Option<&OsStr>,
+    system_dirs: &[&str],
+) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     if let Some(exe) = current_exe {
         if exe.file_name() == Some(OsStr::new("cmm")) {
@@ -312,13 +327,9 @@ pub fn cmm_candidates(home: &Path, current_exe: Option<&Path>, path_var: Option<
             out.push(dir.join("cmm"));
         }
     }
-    out.extend([
-        home.join(".cargo/bin/cmm"),
-        home.join(".local/bin/cmm"),
-        PathBuf::from("/opt/homebrew/bin/cmm"),
-        PathBuf::from("/usr/local/bin/cmm"),
-        home.join("bin/cmm"),
-    ]);
+    out.extend([home.join(".cargo/bin/cmm"), home.join(".local/bin/cmm")]);
+    out.extend(system_dirs.iter().map(|d| Path::new(d).join("cmm")));
+    out.push(home.join("bin/cmm"));
     if let Some(path_var) = path_var {
         out.extend(std::env::split_paths(path_var).filter(|d| d.is_absolute()).map(|d| d.join("cmm")));
     }
@@ -336,7 +347,16 @@ pub fn is_cmm(path: &Path) -> bool {
 
 /// The first candidate that really is `cmm` (see [`cmm_candidates`]).
 pub fn find_cmm(home: &Path, current_exe: Option<&Path>, path_var: Option<&OsStr>) -> Option<PathBuf> {
-    cmm_candidates(home, current_exe, path_var).into_iter().find(|p| is_cmm(p))
+    find_cmm_with(home, current_exe, path_var, &SYSTEM_BIN_DIRS)
+}
+
+fn find_cmm_with(
+    home: &Path,
+    current_exe: Option<&Path>,
+    path_var: Option<&OsStr>,
+    system_dirs: &[&str],
+) -> Option<PathBuf> {
+    candidates_with(home, current_exe, path_var, system_dirs).into_iter().find(|p| is_cmm(p))
 }
 
 /// A binary inside a Cargo `target/` directory disappears on `cargo clean` and changes on every
@@ -562,8 +582,10 @@ mod tests {
         let path_var = std::env::join_paths([&impostor_dir, &real_dir]).unwrap();
         assert!(!is_cmm(&impostor_dir.join("cmm")));
         assert!(is_cmm(&real));
-        assert_eq!(find_cmm(&home, None, Some(&path_var)), Some(real));
-        assert_eq!(find_cmm(&home, None, Some(impostor_dir.as_os_str())), None);
+        // No install locations outside the temp home: a `cmm` installed on this machine (Homebrew,
+        // /usr/local/bin) must not be found before, or instead of, the fixtures.
+        assert_eq!(find_cmm_with(&home, None, Some(&path_var), &[]), Some(real));
+        assert_eq!(find_cmm_with(&home, None, Some(impostor_dir.as_os_str()), &[]), None);
     }
 
     #[test]
