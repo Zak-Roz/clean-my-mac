@@ -210,19 +210,26 @@ jobs:
           fi
           gh release create "$TAG" clean-my-mac.zip "${FLAGS[@]}" --repo "$GITHUB_REPOSITORY"
 
-      # Hosted runners are thrown away after the job; a self-hosted one (RELEASE_RUNNER) is not.
+      # Hosted runners are thrown away after the job, so only a self-hosted one (RELEASE_RUNNER)
+      # needs the trust setting and the certificate removed. On a runner nobody is logged in to,
+      # `security remove-trusted-cert` can wait for an authorization dialog forever, so it gets 60
+      # seconds. The release is published by now: this step is bounded and never fails the job.
       - name: Remove the signing keychain
         if: always()
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          HOSTED: ${{ runner.environment == 'github-hosted' }}
         run: |
           if [ -n "${SIGN_KEYCHAIN:-}" ] && [ -e "$SIGN_KEYCHAIN" ]; then
             security delete-keychain "$SIGN_KEYCHAIN"
           fi
-          if [ -f "$RUNNER_TEMP/cert.pem" ]; then
-            sudo security remove-trusted-cert -d "$RUNNER_TEMP/cert.pem" || true
+          if [ -f "$RUNNER_TEMP/cert.pem" ] && [ "$HOSTED" != true ]; then
+            sudo perl -e 'alarm 60; exec @ARGV' security remove-trusted-cert -d "$RUNNER_TEMP/cert.pem" || true
             HASH=$(openssl x509 -in "$RUNNER_TEMP/cert.pem" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')
-            sudo security delete-certificate -Z "$HASH" /Library/Keychains/System.keychain || true
-            rm -f "$RUNNER_TEMP/cert.pem"
+            sudo perl -e 'alarm 60; exec @ARGV' security delete-certificate -Z "$HASH" /Library/Keychains/System.keychain || true
           fi
+          rm -f "$RUNNER_TEMP/cert.pem"
 
   homebrew:
     needs: release
