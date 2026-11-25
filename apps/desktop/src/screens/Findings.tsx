@@ -1,6 +1,5 @@
-import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
+import { type RefObject, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { Category } from "../bindings/Category";
 import type { Finding } from "../bindings/Finding";
 import type { Risk } from "../bindings/Risk";
 import type { ScanReport } from "../bindings/ScanReport";
@@ -26,6 +25,20 @@ import {
   Segmented,
   Tip,
 } from "../components/ui";
+import {
+  browserStorage,
+  type CollapseState,
+  categoryFoldId,
+  defaultSetCollapsed,
+  type Foldable,
+  foldables,
+  foldSummary,
+  isCollapsed,
+  loadOverrides,
+  saveOverrides,
+  setCollapsed,
+  setFoldId,
+} from "../lib/collapse";
 import {
   actionChip,
   CATEGORY_LABEL,
@@ -103,7 +116,10 @@ function FindingsList({
   searchRef: RefObject<HTMLInputElement | null>;
 }) {
   const { selection, setSelected } = useApp();
-  const [collapsed, setCollapsed] = useState<ReadonlySet<Category>>(new Set());
+  const [folds, setFolds] = useState<CollapseState>(() => ({
+    overrides: loadOverrides(browserStorage()),
+    search: null,
+  }));
 
   const visible = useMemo(
     () => report.findings.filter((f) => (risk === "all" || f.risk === risk) && matchesQuery(f, query)),
@@ -119,13 +135,17 @@ function FindingsList({
   const bulk = visible.filter(isBulkSelectable);
   const anyVisibleSelected = visible.some((f) => selection.has(f.id));
 
-  const toggleCollapsed = (c: Category) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(c)) next.delete(c);
-      else next.add(c);
-      return next;
-    });
+  // Folding is view state only: it never touches the selection, `visible` or the totals.
+  const folded = (item: Foldable) => isCollapsed(folds, query, item);
+  const fold = (ids: string[], collapsed: boolean) => {
+    const next = setCollapsed(folds, query, ids, collapsed);
+    setFolds(next);
+    if (next.overrides !== folds.overrides) saveOverrides(browserStorage(), next.overrides);
+  };
+  const foldItems = useMemo(() => foldables(sections), [sections]);
+  const anyFolded = foldItems.some(folded);
+  const allFolded = foldItems.every(folded);
+  const foldIds = foldItems.map((i) => i.id);
 
   return (
     <ScreenFrame
@@ -190,6 +210,13 @@ function FindingsList({
           >
             Deselect All
           </Button>
+          <span aria-hidden="true" className="h-4 w-px bg-line-strong" />
+          <Button size="sm" variant="ghost" disabled={!anyFolded} onClick={() => fold(foldIds, false)}>
+            Expand All
+          </Button>
+          <Button size="sm" variant="ghost" disabled={allFolded} onClick={() => fold(foldIds, true)}>
+            Collapse All
+          </Button>
         </>
       }
       footer={<SelectionBar report={report} visible={visible} />}
@@ -200,14 +227,7 @@ function FindingsList({
             Try another risk filter or search term.
           </EmptyState>
         ) : (
-          sections.map((section) => (
-            <Section
-              key={section.category}
-              section={section}
-              collapsed={collapsed.has(section.category)}
-              onToggleCollapsed={() => toggleCollapsed(section.category)}
-            />
-          ))
+          sections.map((section) => <Section key={section.category} section={section} folded={folded} fold={fold} />)
         )}
         {report.errors.length > 0 && <ScanErrors report={report} />}
       </div>
@@ -238,63 +258,130 @@ function useBulkState(findings: Finding[]) {
   };
 }
 
-function Section({
-  section,
+type FoldProps = {
+  folded: (item: Foldable) => boolean;
+  fold: (ids: string[], collapsed: boolean) => void;
+};
+
+/** Disclosure chevron for a category or a set; `controls` is the id of the rows it hides. */
+function FoldButton({
   collapsed,
-  onToggleCollapsed,
+  label,
+  controls,
+  onToggle,
 }: {
-  section: CategorySection;
   collapsed: boolean;
-  onToggleCollapsed: () => void;
+  label: string;
+  controls: string;
+  onToggle: () => void;
 }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={!collapsed}
+      aria-controls={controls}
+      aria-label={`${collapsed ? "Expand" : "Collapse"} ${label}`}
+      className="inline-flex size-5 shrink-0 items-center justify-center rounded text-fg-3 hover:bg-surface-3 hover:text-fg"
+    >
+      <ChevronIcon size={12} className={cx("transition-transform", !collapsed && "rotate-90")} />
+    </button>
+  );
+}
+
+/** What a folded category or set hides that matters: ticked items and blocked ones. */
+function FoldSummary({ findings }: { findings: Finding[] }) {
+  const { selection } = useApp();
+  const { selected, hints } = foldSummary(findings, selection);
+  if (selected === 0 && hints.length === 0) return null;
+  return (
+    <span className="flex min-w-0 shrink items-center gap-1.5 overflow-hidden">
+      {selected > 0 && (
+        <span className="shrink-0 text-[11.5px] whitespace-nowrap text-fg-2 tabular-nums">{selected} selected</span>
+      )}
+      {hints.map((h) => (
+        <Tip key={h.text} content={h.reasons.length > 0 ? h.reasons.join("; ") : undefined}>
+          <span className="inline-flex shrink-0 items-center gap-1 rounded bg-warn-soft px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap text-warn-text">
+            <WarningIcon size={11} className="text-warn" />
+            {h.text}
+          </span>
+        </Tip>
+      ))}
+    </span>
+  );
+}
+
+function Section({ section, folded, fold }: { section: CategorySection } & FoldProps) {
   const bulk = useBulkState(section.findings);
   const label = CATEGORY_LABEL[section.category];
+  const rowsId = useId();
+  const id = categoryFoldId(section.category);
+  const collapsed = folded({ id, defaultCollapsed: false });
   return (
     <section aria-label={label}>
       <header className="sticky top-0 z-10 -mx-5 flex h-9 items-center gap-2 bg-bg/95 px-5 backdrop-blur">
-        <button
-          type="button"
-          onClick={onToggleCollapsed}
-          aria-expanded={!collapsed}
-          aria-label={`${collapsed ? "Expand" : "Collapse"} ${label}`}
-          className="-ml-1 inline-flex size-5 items-center justify-center rounded text-fg-3 hover:text-fg"
-        >
-          <ChevronIcon size={12} className={cx("transition-transform", !collapsed && "rotate-90")} />
-        </button>
+        <span className="-ml-1 inline-flex">
+          <FoldButton collapsed={collapsed} label={label} controls={rowsId} onToggle={() => fold([id], !collapsed)} />
+        </span>
         <Checkbox label={`Select ${label}`} {...bulk} />
-        <h2 className="text-[13px] font-semibold">{label}</h2>
+        <h2 className="shrink-0 text-[13px] font-semibold">{label}</h2>
         <span className="text-[12px] text-fg-3 tabular-nums">{section.findings.length}</span>
+        {collapsed && <FoldSummary findings={section.findings} />}
         <span className="flex-1" />
-        <span className="text-[13px] font-semibold tabular-nums">{formatBytes(section.total)}</span>
+        <span className="shrink-0 text-[13px] font-semibold tabular-nums">{formatBytes(section.total)}</span>
       </header>
-      {!collapsed && (
-        <div className="overflow-hidden rounded-lg border border-line bg-surface">
-          {section.blocks.map((block, i) =>
+      <div id={rowsId} hidden={collapsed} className="overflow-hidden rounded-lg border border-line bg-surface">
+        {!collapsed &&
+          section.blocks.map((block, i) =>
             block.kind === "single" ? (
               <FindingRow key={block.finding.id} finding={block.finding} first={i === 0} />
             ) : (
-              <FindingSet key={block.key} setKey={block.key} findings={block.findings} first={i === 0} />
+              <FindingSet
+                key={block.key}
+                setKey={block.key}
+                findings={block.findings}
+                first={i === 0}
+                folded={folded}
+                fold={fold}
+              />
             ),
           )}
-        </div>
-      )}
+      </div>
     </section>
   );
 }
 
-function FindingSet({ setKey, findings, first }: { setKey: string; findings: Finding[]; first: boolean }) {
+function FindingSet({
+  setKey,
+  findings,
+  first,
+  folded,
+  fold,
+}: { setKey: string; findings: Finding[]; first: boolean } & FoldProps) {
   const bulk = useBulkState(findings);
   const { title, subtitle } = setTitle(setKey);
   const total = dedupedTotal(findings).bytes;
   const allManual = findings.every((f) => f.risk === "manual");
+  const rowsId = useId();
+  const id = setFoldId(setKey);
+  const collapsed = folded({ id, defaultCollapsed: defaultSetCollapsed(findings.length) });
   return (
     <div className={cx(!first && "border-t border-line")}>
-      <div className="flex items-center gap-3 bg-surface-2/60 px-3 py-2">
-        <Tip content={allManual ? "Manual items are picked one by one" : undefined}>
-          <span className="inline-flex">
-            <Checkbox label={`Select set ${title}`} {...bulk} />
-          </span>
-        </Tip>
+      {/* The chevron sits over the rows' guide line; the set's checkbox lines up with its rows' checkboxes. */}
+      <div className="flex items-center gap-3 bg-surface-2/60 py-2 pr-3 pl-2.5">
+        <span className="inline-flex items-center gap-[3px]">
+          <FoldButton
+            collapsed={collapsed}
+            label={`set ${title}`}
+            controls={rowsId}
+            onToggle={() => fold([id], !collapsed)}
+          />
+          <Tip content={allManual ? "Manual items are picked one by one" : undefined}>
+            <span className="inline-flex">
+              <Checkbox label={`Select set ${title}`} {...bulk} />
+            </span>
+          </Tip>
+        </span>
         <FolderStackIcon className="shrink-0 text-fg-2" />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[12.5px] font-semibold">{title}</div>
@@ -302,12 +389,11 @@ function FindingSet({ setKey, findings, first }: { setKey: string; findings: Fin
             {formatCount(findings.length, "item")} in this set{subtitle ? ` · ${subtitle}` : ""}
           </div>
         </div>
-        <span className="text-[12.5px] font-semibold tabular-nums">{formatBytes(total)}</span>
+        {collapsed && <FoldSummary findings={findings} />}
+        <span className="shrink-0 text-[12.5px] font-semibold tabular-nums">{formatBytes(total)}</span>
       </div>
-      <div className="relative ml-[19px] border-l-2 border-line-strong">
-        {findings.map((f) => (
-          <FindingRow key={f.id} finding={f} first={false} />
-        ))}
+      <div id={rowsId} hidden={collapsed} className="relative ml-[19px] border-l-2 border-line-strong">
+        {!collapsed && findings.map((f) => <FindingRow key={f.id} finding={f} first={false} />)}
       </div>
     </div>
   );
