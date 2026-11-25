@@ -158,8 +158,9 @@ pub struct Finding {
 pub struct FileMeta {
     /// When the item arrived in its folder: Spotlight `kMDItemDateAdded`, else its birth time.
     pub date_added: Option<DateTime<Utc>>,
-    /// Spotlight `kMDItemLastUsedDate`. `None` with `indexed` means "never opened"; `None`
-    /// without it means "unknown".
+    /// Spotlight `kMDItemLastUsedDate`, trusted only when the item is `indexed` or Spotlight kept
+    /// its `kMDItemUsedDates`. `None` with `indexed` means "never opened"; `None` without it means
+    /// "unknown".
     pub last_opened: Option<DateTime<Utc>>,
     /// Spotlight has a record of the item (it reported `kMDItemDateAdded`), so a missing
     /// `last_opened` really means "never opened".

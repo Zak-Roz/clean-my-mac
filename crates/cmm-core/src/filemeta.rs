@@ -3,11 +3,14 @@
 //!
 //! Spotlight is read through `MDItemCreate` + `MDItemCopyAttribute` (CoreServices), in the same
 //! minimal CoreFoundation FFI style as `volume.rs`. An item counts as **indexed** when Spotlight
-//! reports its `kMDItemDateAdded`: for files outside the index (temp dirs, excluded volumes)
-//! Spotlight still answers `kMDItemLastUsedDate`, but with a value made up from the file's own
-//! dates, so that value is used only for indexed items. Hence:
-//! - indexed, no `kMDItemLastUsedDate` → "never opened" (`indexed: true`, `last_opened: None`);
-//! - not indexed → "unknown" (`indexed: false`, `last_opened: None`); `date_added` falls back to
+//! reports its `kMDItemDateAdded`. For files outside the index (temp dirs, excluded volumes)
+//! Spotlight may still answer `kMDItemLastUsedDate` with a value made up from the file's own
+//! dates, so that date is trusted only for an indexed item or one with a usage record of its own
+//! (`kMDItemUsedDates`, which Spotlight keeps even for some items it has not fully imported).
+//! Hence:
+//! - a trusted `kMDItemLastUsedDate` → opened then;
+//! - indexed without one → "never opened" (`indexed: true`, `last_opened: None`);
+//! - otherwise → "unknown" (`indexed: false`, `last_opened: None`); `date_added` falls back to
 //!   the birth time.
 //!
 //! Symlinks are never followed: a link gets its own `lstat` dates and no Spotlight data.
@@ -33,6 +36,8 @@ pub fn read(path: &Path) -> FileMeta {
 pub(crate) struct Spotlight {
     pub date_added: Option<DateTime<Utc>>,
     pub last_used: Option<DateTime<Utc>>,
+    /// `kMDItemUsedDates` is a non-empty list: Spotlight recorded real uses of the item.
+    pub has_used_dates: bool,
     pub content_type: Option<String>,
     pub where_from: Option<String>,
 }
@@ -44,9 +49,10 @@ pub(crate) fn combine(
     modified: Option<DateTime<Utc>>,
 ) -> FileMeta {
     let indexed = spotlight.date_added.is_some();
+    let trusted = indexed || spotlight.has_used_dates;
     FileMeta {
         date_added: spotlight.date_added.or(created),
-        last_opened: if indexed { spotlight.last_used } else { None },
+        last_opened: if trusted { spotlight.last_used } else { None },
         indexed,
         created,
         modified,
@@ -172,6 +178,12 @@ mod md {
         DateTime::from_timestamp(whole as i64, ((seconds - whole) * 1e9) as u32)
     }
 
+    /// The value is a non-empty CFArray.
+    fn is_non_empty_array(value: CFTypeRef) -> bool {
+        // SAFETY: plain type-id getter; `value` is a live CFArray once the type matches.
+        is_type(value, unsafe { CFArrayGetTypeID() }) && unsafe { CFArrayGetCount(value) } > 0
+    }
+
     /// First string of a CFArray of CFStrings.
     fn read_first_string(value: CFTypeRef) -> Option<String> {
         // SAFETY: plain type-id getter.
@@ -204,6 +216,7 @@ mod md {
         Some(Spotlight {
             date_added: copy("kMDItemDateAdded").and_then(|v| read_date(v.0)),
             last_used: copy("kMDItemLastUsedDate").and_then(|v| read_date(v.0)),
+            has_used_dates: copy("kMDItemUsedDates").is_some_and(|v| is_non_empty_array(v.0)),
             content_type: copy("kMDItemContentType").and_then(|v| read_string(v.0)),
             where_from: copy("kMDItemWhereFroms").and_then(|v| read_first_string(v.0)),
         })
@@ -241,6 +254,15 @@ mod tests {
         assert_eq!(meta.last_opened, None, "unknown, not opened at the birth time");
         assert_eq!(meta.date_added, Some(born));
         assert_eq!(meta.content_type.as_deref(), Some("public.plain-text"));
+    }
+
+    #[test]
+    fn a_usage_record_makes_the_last_used_date_trustworthy_without_date_added() {
+        let opened = at("2026-11-01T12:00:00Z");
+        let spotlight = Spotlight { last_used: Some(opened), has_used_dates: true, ..Default::default() };
+        let meta = combine(spotlight, None, None);
+        assert_eq!(meta.last_opened, Some(opened));
+        assert!(!meta.indexed, "still not indexed: without the date it is not \"never opened\" either");
     }
 
     #[test]

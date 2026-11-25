@@ -9,8 +9,9 @@ export type FileMeta = {
  */
 dateAdded: string | null, 
 /**
- * Spotlight `kMDItemLastUsedDate`. `None` with `indexed` means "never opened"; `None`
- * without it means "unknown".
+ * Spotlight `kMDItemLastUsedDate`, trusted only when the item is `indexed` or Spotlight kept
+ * its `kMDItemUsedDates`. `None` with `indexed` means "never opened"; `None` without it means
+ * "unknown".
  */
 lastOpened: string | null, 
 /**
