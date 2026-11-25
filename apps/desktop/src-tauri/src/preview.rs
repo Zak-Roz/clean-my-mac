@@ -330,8 +330,10 @@ mod tests {
     }
 
     /// QuickLook renders a thumbnail for a real file (read-only; the file is in a temp dir).
+    /// Run it on a Mac you're logged in to: `cargo test -p cmm-desktop quicklook -- --ignored`.
     #[cfg(target_os = "macos")]
     #[test]
+    #[ignore = "needs QuickLook's thumbnail service, which a hosted CI runner without a GUI session lacks"]
     fn quicklook_thumbnail_is_a_png() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("note.txt");
