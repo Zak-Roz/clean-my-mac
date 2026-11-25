@@ -340,7 +340,7 @@ Timestamps are fixed-width RFC3339 UTC strings, so they sort chronologically. Ne
 | `apps/desktop/src-tauri/` | Tauri commands over cmm-core (§7), app state, last-report persistence, menu bar item |
 | `apps/desktop/src/` | React UI: `api.ts` (and `mock.ts` for mock mode), `state.tsx`, pure logic in `lib/`, `screens/`, `components/`, generated `bindings/` |
 | `rules/default.toml` | built-in rule catalog |
-| `fixtures/sample-report.json` | sample `ScanReport` for mock mode, screenshots and the model round-trip test |
+| `fixtures/sample-report.json` | sample `ScanReport` for mock mode (and the screenshots generated from it locally, not committed) and the model round-trip test |
 | `scripts/`, `packaging/`, `.github/workflows/` | install/uninstall, app build and signing, releases, Homebrew cask, CI |
 
 ## 10. Design decisions

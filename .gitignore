@@ -10,6 +10,9 @@ dist/
 # Tauri generated
 apps/desktop/src-tauri/gen/schemas
 
+# Mock-UI screenshots, generated locally by `pnpm screenshots`; not committed
+apps/desktop/docs/screenshots/
+
 # macOS
 .DS_Store
 

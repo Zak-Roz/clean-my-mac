@@ -1,5 +1,5 @@
 // Walks the mock UI (VITE_MOCK=1) through every screen in light and dark mode at the minimum
-// window size and saves PNGs to docs/screenshots/.
+// window size and saves PNGs to docs/screenshots/ (git-ignored: generated locally, never committed).
 //
 //   corepack pnpm --filter desktop dev:mock      # in one terminal
 //   corepack pnpm --filter desktop screenshots   # in another

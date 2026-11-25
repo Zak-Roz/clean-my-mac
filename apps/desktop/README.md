@@ -6,8 +6,10 @@ Tauri 2 + React 19 + Vite + TypeScript. Architecture: `docs/ARCHITECTURE.md` §7
 corepack pnpm --filter desktop dev:mock      # browser UI on :1420 with mock data, no Tauri
 corepack pnpm --filter desktop tauri dev     # the real app (read-only until you confirm a clean)
 corepack pnpm --filter desktop test          # vitest: selection / nested-path de-dup / grouping
-corepack pnpm --filter desktop screenshots   # with dev:mock running: regenerate docs/screenshots
+corepack pnpm --filter desktop screenshots   # with dev:mock running: PNGs of every screen
 ```
+
+Screenshots are generated locally into `docs/screenshots/`, which is git-ignored: none are committed.
 
 ## Layout
 
