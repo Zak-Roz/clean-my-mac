@@ -5,7 +5,7 @@ Tauri 2 + React 19 + Vite + TypeScript. Architecture: `docs/ARCHITECTURE.md` §7
 ```bash
 corepack pnpm --filter desktop dev:mock      # browser UI on :1420 with mock data, no Tauri
 corepack pnpm --filter desktop tauri dev     # the real app (read-only until you confirm a clean)
-corepack pnpm --filter desktop test          # vitest: selection / nested-path de-dup / grouping
+corepack pnpm --filter desktop test          # vitest: selection / nested-path de-dup / grouping / Downloads tab
 corepack pnpm --filter desktop screenshots   # with dev:mock running: PNGs of every screen
 ```
 
@@ -20,13 +20,17 @@ Screenshots are generated locally into `docs/screenshots/`, which is git-ignored
 - `src-tauri/src/commands.rs` — the §7 commands over `cmm-core` plus `reveal_trash`, `monitor_settings`
   and `agent_status` / `agent_install` / `agent_uninstall` (Settings toggle only); blocking work on
   `spawn_blocking`, history opened lazily at `data_dir/history.sqlite` (full scans only), the last
-  full scan persisted to `data_dir/last-report.json` and loaded at startup, core errors returned as
-  readable strings.
+  full scan persisted to `data_dir/last-report.json` and loaded at startup, a Downloads-tab scan
+  (browse-only rules) kept in memory apart from it, core errors returned as readable strings.
 - `src/api.ts` — typed wrappers; `src/mock.ts` replaces them when `VITE_MOCK=1` (simulated scan
   progress, plan/execute with one blocked and one failing item, ~90 days of synthetic history).
-- `src/state.tsx` — app state (volume, report, progress, selection) behind `useApp()`.
-- `src/lib/` — pure logic: risk/selection rules, nested-path de-duplication, grouping, formatting.
-- `src/screens/` — Overview, Findings (+ selection bar), Confirm sheet, History, Settings.
+- `src/state.tsx` — app state (volume, report, progress, selection, the Downloads tab's own scan and
+  selection, the Confirm sheet's ids) behind `useApp()`.
+- `src/lib/` — pure logic: risk/selection rules, nested-path de-duplication, grouping, formatting; `downloads.ts`
+  for the Downloads tab (kinds, opened state, sorting, filters, ranges, main-scan badges).
+- `src-tauri/src/preview.rs` — Downloads previews: QuickLook thumbnails (PNG over IPC, in-memory cache) and the
+  Quick Look panel, both limited to paths whose canonical location is inside `~/Downloads`.
+- `src/screens/` — Overview, Findings (+ selection bar), Downloads, Confirm sheet, History, Settings.
 - `src/components/` — window chrome, small UI primitives, hand-rolled SVG charts.
 
 ## Passive monitoring
