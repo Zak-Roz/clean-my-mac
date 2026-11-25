@@ -61,7 +61,7 @@ else
   TAURI_ARGS=()
 fi
 
-echo "Building $APP_NAME…"
+echo "Building ${APP_NAME}…"
 corepack pnpm --filter desktop exec tauri build --bundles app ${TAURI_ARGS[@]+"${TAURI_ARGS[@]}"} -- --locked
 
 APP="$OUT/bundle/macos/$APP_NAME"
