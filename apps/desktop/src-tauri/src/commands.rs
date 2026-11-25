@@ -10,8 +10,14 @@
 //! after a real clean prunes it, loaded at startup; a missing or unreadable file just means "no scan
 //! yet".
 //!
-//! The stored report is for display and selection only (ARCHITECTURE.md §10, safeguard 1):
-//! `plan_clean` and `execute_clean` re-scan the rules of the selected findings and act only on
+//! A scan of browse-only rules (the Downloads tab: `rule_ids = ["downloads.browse"]`) is kept apart
+//! as the *browse report*: in memory only, never recorded to history, never persisted, never shown
+//! as the last scan and never counted in the Overview; it runs without progress events and without
+//! the menu bar's "Scanning…" state, so it can run next to a full scan.
+//!
+//! The stored reports are for display and selection only (ARCHITECTURE.md §10, safeguard 1):
+//! `plan_clean` and `execute_clean` look the selected ids up in the last full scan and the browse
+//! report, re-scan the rules of the selected findings and act only on
 //! findings that are still exactly what the user picked (`actions::plan_fresh` /
 //! `actions::execute_fresh`). A real clean is refused when the history database (audit log) cannot
 //! be opened (safeguard 5).
@@ -47,9 +53,13 @@ pub const LAST_REPORT_FILE: &str = "last-report.json";
 pub struct AppState {
     pub config: Config,
     pub last_report: Mutex<Option<ScanReport>>,
+    /// The last scan of browse-only rules (the Downloads tab); in memory only.
+    browse_report: Mutex<Option<ScanReport>>,
     /// Opened lazily on first use and kept once it succeeds; `None` while unavailable.
     history: Mutex<Option<History>>,
     scanning: AtomicBool,
+    /// A browse scan is running (separate from `scanning`: it may overlap a full scan).
+    browsing: AtomicBool,
     cleaning: AtomicBool,
 }
 
@@ -60,8 +70,10 @@ impl AppState {
         Self {
             config,
             last_report: Mutex::new(last_report),
+            browse_report: Mutex::new(None),
             history: Mutex::new(None),
             scanning: AtomicBool::new(false),
+            browsing: AtomicBool::new(false),
             cleaning: AtomicBool::new(false),
         }
     }
@@ -99,6 +111,12 @@ impl AppState {
 
     fn last_report_clone(&self) -> Result<Option<ScanReport>, String> {
         Ok(self.last_report.lock().map_err(|e| e.to_string())?.clone())
+    }
+
+    /// What the user may have picked ids from: the last full scan plus the browse report.
+    fn selection_source(&self) -> Result<ScanReport, String> {
+        let browse = self.browse_report.lock().map_err(|e| e.to_string())?.clone();
+        merge_reports(self.last_report_clone()?, browse).ok_or_else(|| "No scan yet — run a scan first".to_string())
     }
 
     pub(crate) fn is_scanning(&self) -> bool {
@@ -160,6 +178,18 @@ fn join_err(e: tauri::Error) -> String {
     format!("background task failed: {e}")
 }
 
+/// The last full scan with the browse report's findings appended (their ids never collide: they
+/// start with their own rule id), or whichever of the two exists.
+fn merge_reports(main: Option<ScanReport>, browse: Option<ScanReport>) -> Option<ScanReport> {
+    match (main, browse) {
+        (Some(mut main), Some(browse)) => {
+            main.findings.extend(browse.findings);
+            Some(main)
+        }
+        (main, browse) => main.or(browse),
+    }
+}
+
 /// Drops the findings a real (non-dry-run) clean handled successfully, so the stored report and the
 /// UI do not offer them again.
 fn prune_cleaned(report: &mut ScanReport, result: &CleanResult) {
@@ -214,8 +244,16 @@ pub(crate) fn run_full_scan(app: &AppHandle) -> Result<ScanReport, String> {
 }
 
 /// Scans with progress events, records full scans to history, keeps the report and refreshes the
-/// menu bar. Blocking: call from a blocking thread.
+/// menu bar; a browse scan goes to [`run_browse_scan`] instead. Blocking: call from a blocking
+/// thread.
 fn run_scan(app: &AppHandle, opts: &ScanOptions) -> Result<ScanReport, String> {
+    {
+        let state = app.state::<AppState>();
+        let rules = state.load_rules()?;
+        if cmm_core::scan::is_browse_scan(&rules, opts) {
+            return run_browse_scan(&state, &rules, opts);
+        }
+    }
     let result = (|| {
         let state = app.state::<AppState>();
         let _busy = BusyGuard::acquire(&state.scanning, "a scan")?;
@@ -239,6 +277,14 @@ fn run_scan(app: &AppHandle, opts: &ScanOptions) -> Result<ScanReport, String> {
     result
 }
 
+/// A scan of browse-only rules (the Downloads tab): kept as the browse report only (module docs).
+fn run_browse_scan(state: &AppState, rules: &[RuleDef], opts: &ScanOptions) -> Result<ScanReport, String> {
+    let _busy = BusyGuard::acquire(&state.browsing, "a Downloads scan")?;
+    let report = cmm_core::scan(rules, opts, &state.config, &|_| {});
+    *state.browse_report.lock().map_err(|e| e.to_string())? = Some(report.clone());
+    Ok(report)
+}
+
 #[tauri::command]
 pub async fn last_report(state: State<'_, AppState>) -> Result<Option<ScanReport>, String> {
     state.last_report_clone()
@@ -250,7 +296,7 @@ pub async fn last_report(state: State<'_, AppState>) -> Result<Option<ScanReport
 pub async fn plan_clean(app: AppHandle, req: CleanRequest) -> Result<CleanPlan, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let report = state.last_report_clone()?.ok_or("No scan yet — run a scan first")?;
+        let report = state.selection_source()?;
         let rules = state.load_rules()?;
         actions::plan_fresh(&rules, &report, &req, &state.config, &home_dir()).map_err(core_err)
     })
@@ -263,7 +309,7 @@ pub async fn execute_clean(app: AppHandle, req: CleanRequest) -> Result<CleanRes
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _busy = BusyGuard::acquire(&state.cleaning, "a clean")?;
-        let report = state.last_report_clone()?.ok_or("No scan yet — run a scan first")?;
+        let report = state.selection_source()?;
         let rules = state.load_rules()?;
         let home = home_dir();
         let emit = |item: &CleanItemResult| {
@@ -286,6 +332,9 @@ pub async fn execute_clean(app: AppHandle, req: CleanRequest) -> Result<CleanRes
         {
             prune_cleaned(stored, &result);
             state.persist_report(stored);
+        }
+        if let Some(browse) = state.browse_report.lock().map_err(|e| e.to_string())?.as_mut() {
+            prune_cleaned(browse, &result);
         }
         if !result.dry_run {
             crate::tray::refresh(&app, false);
@@ -441,6 +490,30 @@ mod tests {
         };
         prune_cleaned(&mut report, &result);
         assert_eq!(report.findings.len(), before);
+    }
+
+    #[test]
+    fn selection_source_merges_the_browse_report() {
+        let main = fixture();
+        let mut browse = fixture();
+        browse.findings.truncate(1);
+        browse.findings[0].id = "downloads.browse:/Users/you/Downloads/a.pdf".into();
+        browse.findings[0].rule_id = "downloads.browse".into();
+
+        let merged = merge_reports(Some(main.clone()), Some(browse.clone())).unwrap();
+        assert_eq!(merged.id, main.id, "the full scan stays the base");
+        assert_eq!(merged.findings.len(), main.findings.len() + 1);
+        assert_eq!(merged.findings.last().unwrap().id, browse.findings[0].id);
+        assert_eq!(merge_reports(None, Some(browse.clone())).unwrap().findings.len(), 1);
+        assert_eq!(merge_reports(Some(main.clone()), None).unwrap().findings.len(), main.findings.len());
+        assert!(merge_reports(None, None).is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(Config { data_dir: dir.path().join("data"), ..Config::default() });
+        assert!(state.selection_source().unwrap_err().starts_with("No scan yet"));
+        *state.browse_report.lock().unwrap() = Some(browse);
+        assert_eq!(state.selection_source().unwrap().findings.len(), 1, "a Downloads scan alone is enough");
+        assert!(state.last_report_clone().unwrap().is_none(), "and it is never the last scan");
     }
 
     #[test]
