@@ -428,6 +428,7 @@ mod tests {
             selected_by_default: true,
             blockers: vec![],
             group: None,
+            meta: None,
         }
     }
 

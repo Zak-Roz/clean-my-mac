@@ -31,4 +31,10 @@ requiresQuit: Array<string>,
 /**
  * The data comes back on its own (caches).
  */
-regenerates: boolean, enabled: boolean, };
+regenerates: boolean, enabled: boolean, 
+/**
+ * Browse-only rules (the Downloads tab's `downloads.browse`) run only when a scan names them
+ * in `ScanOptions::rule_ids`: never in a default scan, a category scan, the background scan
+ * or the Overview totals. The TOML catalog spells it `browse_only`.
+ */
+browseOnly: boolean, };

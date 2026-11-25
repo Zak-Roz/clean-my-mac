@@ -50,6 +50,8 @@ pub enum DetectorKind {
     RedundantArchives,
     SimulatorRuntimes,
     Docker,
+    /// One finding per top-level entry of each root (the Downloads tab); see ARCHITECTURE.md §4.
+    Entries,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -93,6 +95,11 @@ pub struct RuleDef {
     pub regenerates: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Browse-only rules (the Downloads tab's `downloads.browse`) run only when a scan names them
+    /// in `ScanOptions::rule_ids`: never in a default scan, a category scan, the background scan
+    /// or the Overview totals. The TOML catalog spells it `browse_only`.
+    #[serde(default, alias = "browse_only")]
+    pub browse_only: bool,
 }
 
 fn empty_object() -> serde_json::Value {
@@ -138,6 +145,33 @@ pub struct Finding {
     pub blockers: Vec<String>,
     /// Set key for versioned siblings / worktrees of one repo.
     pub group: Option<String>,
+    /// File metadata for browsing (`entries` findings only; `None` elsewhere and in reports saved
+    /// before this field existed).
+    #[serde(default)]
+    pub meta: Option<FileMeta>,
+}
+
+/// Dates and type of one file or folder, from Spotlight with a file-system fallback.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct FileMeta {
+    /// When the item arrived in its folder: Spotlight `kMDItemDateAdded`, else its birth time.
+    pub date_added: Option<DateTime<Utc>>,
+    /// Spotlight `kMDItemLastUsedDate`. `None` with `indexed` means "never opened"; `None`
+    /// without it means "unknown".
+    pub last_opened: Option<DateTime<Utc>>,
+    /// Spotlight has a record of the item (it reported `kMDItemDateAdded`), so a missing
+    /// `last_opened` really means "never opened".
+    pub indexed: bool,
+    /// Birth time of the item itself (`lstat`).
+    pub created: Option<DateTime<Utc>>,
+    /// Modification time of the item itself (`lstat`; a folder's own mtime, not its contents').
+    pub modified: Option<DateTime<Utc>>,
+    /// Uniform Type Identifier (`kMDItemContentType`), e.g. "com.adobe.pdf".
+    pub content_type: Option<String>,
+    /// First `kMDItemWhereFroms` entry: the URL the item was downloaded from.
+    pub where_from: Option<String>,
 }
 
 impl Finding {
@@ -332,6 +366,7 @@ mod tests {
                 selected_by_default: true,
                 blockers: vec![],
                 group: None,
+                meta: None,
             }],
             errors: vec![ScanError { path: "/x".into(), message: "denied".into() }],
         }
@@ -362,6 +397,46 @@ mod tests {
         json["findings"][0].as_object_mut().unwrap().remove("isDir");
         let report: ScanReport = serde_json::from_value(json).unwrap();
         assert!(!report.findings[0].is_dir);
+    }
+
+    /// Reports saved before `meta` existed still load; a finding with metadata round-trips.
+    #[test]
+    fn finding_meta_is_optional_and_round_trips() {
+        let mut json = serde_json::to_value(sample_report()).unwrap();
+        assert!(json["findings"][0]["meta"].is_null());
+        json["findings"][0].as_object_mut().unwrap().remove("meta");
+        let report: ScanReport = serde_json::from_value(json).unwrap();
+        assert!(report.findings[0].meta.is_none());
+
+        let mut finding = report.findings[0].clone();
+        let at = DateTime::parse_from_rfc3339("2026-10-01T08:30:00Z").unwrap().to_utc();
+        finding.meta = Some(FileMeta {
+            date_added: Some(at),
+            last_opened: None,
+            indexed: true,
+            created: Some(at),
+            modified: None,
+            content_type: Some("com.adobe.pdf".into()),
+            where_from: Some("https://example.com/file.pdf".into()),
+        });
+        let json = serde_json::to_value(&finding).unwrap();
+        assert_eq!(json["meta"]["dateAdded"], "2026-10-01T08:30:00Z");
+        assert_eq!(json["meta"]["contentType"], "com.adobe.pdf");
+        let back: Finding = serde_json::from_value(json).unwrap();
+        assert_eq!(back.meta, finding.meta);
+    }
+
+    #[test]
+    fn rule_browse_only_defaults_to_false() {
+        let rule: RuleDef = serde_json::from_value(serde_json::json!({
+            "id": "a.b", "title": "t", "description": "d.", "category": "downloads", "risk": "manual",
+            "detector": "entries", "action": "trash"
+        }))
+        .unwrap();
+        assert!(!rule.browse_only);
+        assert_eq!(rule.detector, DetectorKind::Entries);
+        let json = serde_json::to_value(&rule).unwrap();
+        assert_eq!(json["browseOnly"], false);
     }
 
     #[test]

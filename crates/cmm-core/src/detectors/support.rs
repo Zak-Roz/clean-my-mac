@@ -237,6 +237,7 @@ pub mod testutil {
             requires_quit: vec![],
             regenerates: false,
             enabled: true,
+            browse_only: false,
         }
     }
 

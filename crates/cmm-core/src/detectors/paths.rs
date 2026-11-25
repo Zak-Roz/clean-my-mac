@@ -62,6 +62,7 @@ mod tests {
             requires_quit: vec![],
             regenerates: true,
             enabled: true,
+            browse_only: false,
         }
     }
 

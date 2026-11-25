@@ -28,7 +28,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": [],
-      "group": "Downloads/backups/mongo_*"
+      "group": "Downloads/backups/mongo_*",
+      "meta": null
     },
     {
       "id": "downloads.versioned-siblings:/Users/you/Downloads/backups/mongo_05_03_2025",
@@ -47,7 +48,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": [],
-      "group": "Downloads/backups/mongo_*"
+      "group": "Downloads/backups/mongo_*",
+      "meta": null
     },
     {
       "id": "downloads.versioned-siblings:/Users/you/Downloads/backups/mongo_17_05_2025",
@@ -66,7 +68,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": [],
-      "group": "Downloads/backups/mongo_*"
+      "group": "Downloads/backups/mongo_*",
+      "meta": null
     },
     {
       "id": "system.aerial-wallpapers:/Users/you/Library/Application Support/com.apple.wallpaper/aerials/videos",
@@ -85,7 +88,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": [],
-      "group": null
+      "group": null,
+      "meta": null
     },
     {
       "id": "containers.docker:system-prune",
@@ -104,7 +108,8 @@
       "command": ["docker", "system", "prune", "-f"],
       "selectedByDefault": false,
       "blockers": [],
-      "group": null
+      "group": null,
+      "meta": null
     },
     {
       "id": "ai.ai-profiles.migration-backups:/Users/you/Library/Application Support/ai-profiles/migration-backup-1789380000000",
@@ -123,7 +128,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": [],
-      "group": null
+      "group": null,
+      "meta": null
     },
     {
       "id": "ai.claude-desktop.vm-bundles:/Users/you/Library/Application Support/ai-profiles/profiles/3f9c2d41-7b6e-4c1a-9e85-2d0f6a7b1c93/gui-data/vm_bundles",
@@ -142,7 +148,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": ["Claude is running"],
-      "group": null
+      "group": null,
+      "meta": null
     },
     {
       "id": "cache.npm:/Users/you/.npm/_cacache",
@@ -161,7 +168,8 @@
       "command": null,
       "selectedByDefault": true,
       "blockers": [],
-      "group": null
+      "group": null,
+      "meta": null
     },
     {
       "id": "ai.claude-desktop.vm-bundles:/Users/you/Library/Application Support/Claude/vm_bundles",
@@ -180,7 +188,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": [],
-      "group": null
+      "group": null,
+      "meta": null
     },
     {
       "id": "xcode.simulator-runtimes:9D3F1A7C-2B4E-4F86-A1C5-7E0B2D9F4C31",
@@ -199,7 +208,8 @@
       "command": ["xcrun", "simctl", "runtime", "delete", "9D3F1A7C-2B4E-4F86-A1C5-7E0B2D9F4C31"],
       "selectedByDefault": false,
       "blockers": [],
-      "group": null
+      "group": null,
+      "meta": null
     },
     {
       "id": "cache.yarn:/Users/you/Library/Caches/Yarn",
@@ -218,7 +228,8 @@
       "command": null,
       "selectedByDefault": true,
       "blockers": [],
-      "group": null
+      "group": null,
+      "meta": null
     },
     {
       "id": "dev.git-worktrees:/Users/you/Developer/example-app/.claude/worktrees/feature-login",
@@ -237,7 +248,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": [],
-      "group": "/Users/you/Developer/example-app"
+      "group": "/Users/you/Developer/example-app",
+      "meta": null
     },
     {
       "id": "dev.git-worktrees:/Users/you/Developer/example-app/.claude/worktrees/bugfix-123",
@@ -256,7 +268,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": ["Uncommitted changes"],
-      "group": "/Users/you/Developer/example-app"
+      "group": "/Users/you/Developer/example-app",
+      "meta": null
     },
     {
       "id": "dev.git-worktrees:/Users/you/Developer/example-app/.claude/worktrees/agent-task",
@@ -275,7 +288,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": [],
-      "group": "/Users/you/Developer/example-app"
+      "group": "/Users/you/Developer/example-app",
+      "meta": null
     },
     {
       "id": "dev.stale-artifacts:/Users/you/Developer/old-site/node_modules",
@@ -294,7 +308,8 @@
       "command": null,
       "selectedByDefault": false,
       "blockers": [],
-      "group": null
+      "group": null,
+      "meta": null
     }
   ],
   "errors": [
