@@ -12,9 +12,16 @@ import { DOWNLOADS_RULE } from "./lib/downloads";
 import { defaultSelection, isSelectable } from "./lib/findings";
 import { errorMessage } from "./lib/format";
 
-export type Screen = "overview" | "findings" | "downloads" | "history" | "settings";
+export type Screen = "overview" | "findings" | "downloads" | "storage" | "history" | "settings";
 
-const SCREENS: readonly string[] = ["overview", "findings", "downloads", "history", "settings"] satisfies Screen[];
+const SCREENS: readonly string[] = [
+  "overview",
+  "findings",
+  "downloads",
+  "storage",
+  "history",
+  "settings",
+] satisfies Screen[];
 
 function isScreen(value: string): value is Screen {
   return SCREENS.includes(value);

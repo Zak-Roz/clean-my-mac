@@ -9,14 +9,16 @@ import { Findings } from "./screens/Findings";
 import { History } from "./screens/History";
 import { Overview } from "./screens/Overview";
 import { Settings } from "./screens/Settings";
+import { Storage } from "./screens/Storage";
 import { AppProvider, type Screen, useApp } from "./state";
 
 const SHORTCUTS: Record<string, Screen> = {
   "1": "overview",
   "2": "findings",
   "3": "downloads",
-  "4": "history",
-  "5": "settings",
+  "4": "storage",
+  "5": "history",
+  "6": "settings",
   ",": "settings",
 };
 
@@ -41,6 +43,7 @@ function Shell() {
       {screen === "overview" && <Overview />}
       {screen === "findings" && <Findings />}
       {screen === "downloads" && <Downloads />}
+      {screen === "storage" && <Storage />}
       {screen === "history" && <History />}
       {screen === "settings" && <Settings />}
       <ConfirmDialog />

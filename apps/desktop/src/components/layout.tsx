@@ -5,15 +5,16 @@ import type { ReactNode } from "react";
 import { MOCK } from "../api";
 import { formatBytes, formatDuration, relativeTime } from "../lib/format";
 import { type Screen, useApp } from "../state";
-import { ClockIcon, DownloadIcon, GaugeIcon, ListIcon, SlidersIcon } from "./icons";
+import { ClockIcon, DownloadIcon, GaugeIcon, ListIcon, SlidersIcon, StorageIcon } from "./icons";
 import { Button, Callout, cx, ProgressBar, Spinner } from "./ui";
 
 const NAV: { screen: Screen; label: string; Icon: typeof GaugeIcon; key: string }[] = [
   { screen: "overview", label: "Overview", Icon: GaugeIcon, key: "1" },
   { screen: "findings", label: "Findings", Icon: ListIcon, key: "2" },
   { screen: "downloads", label: "Downloads", Icon: DownloadIcon, key: "3" },
-  { screen: "history", label: "History", Icon: ClockIcon, key: "4" },
-  { screen: "settings", label: "Settings", Icon: SlidersIcon, key: "5" },
+  { screen: "storage", label: "Storage", Icon: StorageIcon, key: "4" },
+  { screen: "history", label: "History", Icon: ClockIcon, key: "5" },
+  { screen: "settings", label: "Settings", Icon: SlidersIcon, key: "6" },
 ];
 
 export function Sidebar() {

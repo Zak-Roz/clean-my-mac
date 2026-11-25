@@ -15,6 +15,9 @@ import type { RuleDef } from "./bindings/RuleDef";
 import type { ScanOptions } from "./bindings/ScanOptions";
 import type { ScanProgress } from "./bindings/ScanProgress";
 import type { ScanReport } from "./bindings/ScanReport";
+import type { StorageBreakdown } from "./bindings/StorageBreakdown";
+import type { StorageNode } from "./bindings/StorageNode";
+import type { StorageProgress } from "./bindings/StorageProgress";
 import type { VolumeInfo } from "./bindings/VolumeInfo";
 import { createMockApi } from "./mock";
 
@@ -22,6 +25,7 @@ export const MOCK = import.meta.env.VITE_MOCK === "1";
 
 export const SCAN_PROGRESS_EVENT = "scan://progress";
 export const CLEAN_ITEM_EVENT = "clean://item";
+export const STORAGE_PROGRESS_EVENT = "storage://progress";
 // Scans started from the menu bar (src-tauri/src/tray.rs), and its "open History" items.
 export const SCAN_STARTED_EVENT = "scan://started";
 export const SCAN_FINISHED_EVENT = "scan://finished";
@@ -61,6 +65,13 @@ export interface Api {
   onNavigate(handler: (screen: string) => void): Promise<UnlistenFn>;
   onScanProgress(handler: (progress: ScanProgress) => void): Promise<UnlistenFn>;
   onCleanItem(handler: (item: CleanItemResult) => void): Promise<UnlistenFn>;
+  /** The last storage breakdown, found marks recomputed for the current report; null if never measured. */
+  storageCached(): Promise<StorageBreakdown | null>;
+  /** Walks the disk again (read-only, tens of seconds), emitting `storage://progress`. */
+  measureStorage(): Promise<StorageBreakdown>;
+  /** One folder's entries, sized, for drilling below what the breakdown kept. */
+  storageChildren(path: string): Promise<StorageNode>;
+  onStorageProgress(handler: (progress: StorageProgress) => void): Promise<UnlistenFn>;
 }
 
 const tauriApi: Api = {
@@ -95,6 +106,10 @@ const tauriApi: Api = {
   onNavigate: (handler) => listen<string>(NAVIGATE_EVENT, (e) => handler(e.payload)),
   onScanProgress: (handler) => listen<ScanProgress>(SCAN_PROGRESS_EVENT, (e) => handler(e.payload)),
   onCleanItem: (handler) => listen<CleanItemResult>(CLEAN_ITEM_EVENT, (e) => handler(e.payload)),
+  storageCached: () => invoke<StorageBreakdown | null>("storage_cached"),
+  measureStorage: () => invoke<StorageBreakdown>("measure_storage"),
+  storageChildren: (path) => invoke<StorageNode>("storage_children", { path }),
+  onStorageProgress: (handler) => listen<StorageProgress>(STORAGE_PROGRESS_EVENT, (e) => handler(e.payload)),
 };
 
 // Constructed only in mock mode, so production builds tree-shake the mock and the fixture away.

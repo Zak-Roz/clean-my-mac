@@ -127,6 +127,34 @@ pub struct CleanResult { pub dry_run: bool, pub mode: CleanMode, pub items: Vec<
 pub enum GrowthKind { Rule, Item }               // a GrowthItem sums a whole rule, or tracks one finding
 pub struct GrowthItem { pub kind: GrowthKind, pub key: String, pub label: String, pub bytes_then: u64, pub bytes_now: u64, pub delta: i64 }
 pub struct FreeSpacePoint { pub at: DateTime<Utc>, pub free_bytes: u64 }
+
+// Storage view (§11)
+pub enum StorageKind { Group, Volume, Folder, File, Rest, Unmeasured }
+pub enum Unreadable { Protected, Denied }        // EPERM (privacy / SIP) vs EACCES (root, other users)
+pub struct StorageNode {
+    pub id: String,                 // absolute path, or "@macos", "@home-other", "@unmeasured", "PATH/@rest", …
+    pub label: String,
+    pub path: Option<String>,       // for a rest node: the folder whose smaller entries it sums
+    pub kind: StorageKind,
+    pub bytes: u64,                 // ALLOCATED, hardlinks once per breakdown
+    pub files: u64,
+    pub entries: u64,               // direct entries; a folder with entries and no children loads on demand
+    pub modified: Option<DateTime<Utc>>,   // newest mtime inside
+    pub unreadable: Option<Unreadable>,    // something inside could not be read: bytes is a lower bound
+    pub found_bytes: u64,           // the part the last scan's findings count (≤ bytes)
+    pub note: Option<String>,
+    pub children: Vec<StorageNode>, // biggest first, rest last
+}
+pub struct StorageBreakdown {
+    pub measured_at: DateTime<Utc>, pub duration_ms: u64, pub scan_id: Option<String>,
+    pub total_bytes: u64, pub free_bytes: u64, pub used_bytes: u64,   // used = total - free (the Overview's)
+    pub walked_bytes: u64, pub volumes_bytes: u64, pub unmeasured_bytes: u64, pub overcount_bytes: u64,
+    pub full_disk_access: bool, pub local_snapshots: Vec<String>,
+    pub found_bytes: u64, pub found_located_bytes: u64,
+    pub nodes: Vec<StorageNode>, pub errors: Vec<ScanError>,
+}
+pub enum StoragePhase { Volumes, Walking, Done }
+pub struct StorageProgress { pub phase: StoragePhase, pub walked_bytes: u64, pub expected_bytes: u64 }
 ```
 
 `config.rs`:
@@ -161,6 +189,13 @@ pub fn expand_roots(rule: &RuleDef, home: &Path) -> Vec<PathBuf>;        // "~" 
 pub struct SizeInfo { pub bytes: u64, pub logical_bytes: u64, pub files: u64, pub newest_mtime: Option<DateTime<Utc>> }
 pub struct Sizer { /* shared, thread-safe; dedupes (dev, ino) */ }
 impl Sizer { pub fn new() -> Self; pub fn size_of(&self, path: &Path) -> SizeInfo; } // never follows symlinks, never crosses devices
+pub struct TreeOptions { pub max_depth: u32, pub min_bytes: u64, pub max_children: usize }
+pub struct SizeTree { pub name: OsString, pub is_dir: bool, pub info: SizeInfo, pub entries: u64, pub expanded: bool,
+                      pub children: Vec<SizeTree>, pub rest: Rest, pub unreadable: Option<Unreadable> }
+impl Sizer {
+    pub fn size_tree(&self, path: &Path, opts: &TreeOptions) -> SizeTree; // same walk, keeps the biggest descendants
+    pub fn visited_bytes(&self) -> u64;                                  // progress of running walks
+}
 
 // process.rs
 pub struct ProcessSnapshot { /* names of running processes */ }
@@ -170,6 +205,10 @@ pub fn run_with_timeout(program, args, timeout) -> Result<Output, CoreError>; //
 // volume.rs
 pub fn volume_info(home: &Path) -> VolumeInfo;
 pub fn has_full_disk_access(home: &Path) -> bool;  // probe: read_dir(~/Library/Safari) or ~/.Trash succeeds
+pub struct Mount { pub from: String, pub on: PathBuf, pub fs_type: String, pub total_bytes: u64, pub free_bytes: u64, pub used_bytes: u64 }
+pub fn mount_of(path: &Path) -> Option<Mount>;     // statfs; APFS used_bytes = ATTR_VOL_SPACEUSED (this volume alone)
+pub fn mounts() -> Vec<Mount>;                     // getfsstat
+impl Mount { pub fn apfs_container(&self) -> Option<&str>; } // "/dev/disk3s5" -> "disk3"
 
 // scan.rs
 pub struct ScanContext<'a> { pub home: PathBuf, pub now: DateTime<Utc>, pub sizer: &'a Sizer, pub processes: &'a ProcessSnapshot, pub config: &'a Config }
@@ -183,6 +222,14 @@ pub fn is_browse_scan(rules, opts) -> bool;         // selects ≥ 1 rule, all b
 
 // filemeta.rs
 pub fn read(path: &Path) -> FileMeta;              // never fails; never follows a symlink
+
+// storage.rs — read-only breakdown of the used space (§11)
+pub struct StorageEnv { /* home, data_root, data_used_bytes, firmlinks, total/free, volumes, swap, snapshots, FDA */ }
+impl StorageEnv { pub fn detect(home: &Path) -> Self; }
+pub fn breakdown(home: &Path, report: Option<&ScanReport>, on_progress: &(dyn Fn(StorageProgress) + Sync)) -> StorageBreakdown;
+pub fn breakdown_with(env: &StorageEnv, report: Option<&ScanReport>, opts: &TreeOptions, on_progress) -> StorageBreakdown;
+pub fn children(path: &Path, report: Option<&ScanReport>) -> (StorageNode, Vec<ScanError>); // one folder, every entry
+pub fn annotate(breakdown: &mut StorageBreakdown, report: Option<&ScanReport>);              // found marks, no walk
 
 // detectors/mod.rs
 pub trait Detector: Send + Sync {
@@ -270,7 +317,9 @@ cmm scan   [--json] [--category <c>]... [--rule <id>]... [--no-record] [--quiet]
 cmm rules  [--json]
 cmm clean  (--id <finding-id>... | --rule <id>... | --safe) [--delete] [--yes]   # dry-run unless --yes
 cmm history [--days 30] [--json]                          # growth + free-space trend
-cmm du <path> [--depth 1] [--top 20]                      # quick allocated-size breakdown
+cmm du <path> [--depth 1] [--top 20]                      # quick allocated-size breakdown (Sizer::size_tree)
+cmm storage [--json] [--depth 1] [--top 12] [--no-findings]  # the whole used space in parts (§11); found marks from
+                                                          # the app's last-report.json when there is one
 cmm agent  install [--at 10:00] | uninstall | status      # daily background scan (LaunchAgent); never cleans
 ```
 
@@ -319,6 +368,9 @@ quick_look(path: String) -> bool                     // opens/closes the system 
 open_full_disk_access_settings()
 monitor_settings() -> MonitorSettings                // the monitoring fields of config.toml
 agent_status() / agent_install() / agent_uninstall() -> AgentStatus   // Settings toggle only
+storage_cached() -> Option<StorageBreakdown>         // src-tauri/src/storage.rs: last measurement, found marks for the current report
+measure_storage() -> StorageBreakdown                // walks the disk; emits "storage://progress" (StorageProgress)
+storage_children(path: String) -> StorageNode        // one folder's entries, for drilling below the kept tree
 ```
 
 Scans started from the menu bar (`src-tauri/src/tray.rs`) also emit "scan://started", "scan://finished"
@@ -339,12 +391,15 @@ Screens: **Overview** (free-space gauge, swap, Trash, last scan, top growth, fre
 opened / "Never opened" / "Unknown", source domain, badges when the main scan's installer, extracted-archive
 or older-version rules flag the item or something inside it; sort by size, date added, last opened, name;
 filter by kind, "not opened for 30 / 90 / 365 days" and text; click / Shift-click / Select All, Space or the
-eye button for Quick Look; the same Confirm sheet, Move to Trash by default) and **Settings** (monitoring
-thresholds, background-scan toggle). ⌘1–⌘5 switch screens in that order (Overview, Findings, Downloads,
-History, Settings). The menu bar item shows free space and
+eye button for Quick Look; the same Confirm sheet, Move to Trash by default), **Storage** (§11; also "What's
+using space?" on the Overview: the used space in parts with drill-down, found marks linking to Findings, Reveal
+in Finder, no delete action) and **Settings** (monitoring thresholds, background-scan toggle). ⌘1–⌘6 switch
+screens in sidebar order (Overview, Findings, Downloads, Storage, History, Settings). The menu bar item shows
+free space and
 turns to a warning state below `low_space_threshold_bytes`.
 Mock mode (`VITE_MOCK=1`) serves `fixtures/sample-report.json` so the UI can be built without a real scan;
-the Downloads tab gets invented `/Users/you/Downloads/...` entries and generated placeholder thumbnails.
+the Downloads tab gets invented `/Users/you/Downloads/...` entries and generated placeholder thumbnails, the
+Storage screen an invented breakdown (`mockStorage.ts`).
 
 ## 8. Data files (`data_dir`)
 
@@ -357,8 +412,8 @@ actions(id INTEGER PK, at TEXT, finding_id TEXT, path TEXT, mode TEXT, bytes INT
 ```
 
 Timestamps are fixed-width RFC3339 UTC strings, so they sort chronologically. Next to it: `config.toml`
-(optional), `rules.d/*.toml` (user rule overrides), `last-report.json` (the app's last full scan) and
-`monitor-state.json` (alerts already notified).
+(optional), `rules.d/*.toml` (user rule overrides), `last-report.json` (the app's last full scan),
+`last-storage.json` (the Storage view's last measurement, §11) and `monitor-state.json` (alerts already notified).
 
 ## 9. Module map
 
@@ -369,9 +424,10 @@ Timestamps are fixed-width RFC3339 UTC strings, so they sort chronologically. Ne
 | `cmm-core/src/error.rs` | `CoreError` |
 | `cmm-core/src/rules/` | catalog loading (built-in + `rules.d` overrides), strict parsing, root expansion |
 | `cmm-core/src/scan.rs` | scan orchestration: parallel rules, blockers, size threshold, nested findings, sorting |
-| `cmm-core/src/size.rs` | allocated-size measurement (hardlinks once, no symlinks, one device) |
-| `cmm-core/src/volume.rs` | volume capacity, swap, Trash size, Full Disk Access probe |
+| `cmm-core/src/size.rs` | allocated-size measurement (hardlinks once, no symlinks, one device); the tree walk behind Storage and `cmm du` |
+| `cmm-core/src/volume.rs` | volume capacity, swap, Trash size, Full Disk Access probe, mounted volumes (`getfsstat`, APFS per-volume use) |
 | `cmm-core/src/filemeta.rs` | per-item Spotlight metadata (date added, last opened, type, origin) with an `lstat` fallback |
+| `cmm-core/src/storage.rs` | Storage breakdown (§11): environment detection, parallel walk with progress, top-level grouping, found marks |
 | `cmm-core/src/process.rs` | running-process snapshot for `requires_quit`; the timed runner and tool resolver for external programs |
 | `cmm-core/src/detectors/` | `Detector` trait, registry and `make_finding`; one module per detector, plus `naming.rs` (version tokens), `support.rs` (shared helpers), `external.rs` (read-only tool calls) and `catalog_tests.rs` (catalog consistency) |
 | `cmm-core/src/guard.rs` | path guard (§6.2) |
@@ -380,8 +436,8 @@ Timestamps are fixed-width RFC3339 UTC strings, so they sort chronologically. Ne
 | `cmm-core/src/monitor.rs` | alerts after a recorded scan (low space, fast growth), de-duplication, notification text |
 | `cmm-core/src/agent.rs` | the background-scan LaunchAgent: install, uninstall, status |
 | `cmm-cli/src/main.rs`, `cmd/` | argument parsing and dispatch; one module per subcommand, shared formatting in `cmd/mod.rs` |
-| `apps/desktop/src-tauri/` | Tauri commands over cmm-core (§7), app state, last-report persistence, the browse report, menu bar item; `preview.rs`: thumbnails, Quick Look, the Downloads path check |
-| `apps/desktop/src/` | React UI: `api.ts` (and `mock.ts` for mock mode), `state.tsx`, pure logic in `lib/` (`downloads.ts` for the Downloads tab), `screens/`, `components/`, generated `bindings/` |
+| `apps/desktop/src-tauri/` | Tauri commands over cmm-core (§7), app state, last-report persistence, the browse report, menu bar item; `preview.rs`: thumbnails, Quick Look, the Downloads path check; `storage.rs` for the Storage view |
+| `apps/desktop/src/` | React UI: `api.ts` (and `mock.ts` + `mockStorage.ts` for mock mode), `state.tsx`, `storageState.ts`, pure logic in `lib/` (`downloads.ts` for the Downloads tab), `screens/`, `components/`, generated `bindings/` |
 | `rules/default.toml` | built-in rule catalog |
 | `fixtures/sample-report.json` | sample `ScanReport` for mock mode (and the screenshots generated from it locally, not committed) and the model round-trip test |
 | `scripts/`, `packaging/`, `.github/workflows/` | install/uninstall, app build and signing, releases, Homebrew cask, CI |
@@ -513,6 +569,7 @@ Code comments refer to these by number ("safeguard 1"); they take precedence ove
 - Files hidden via `assume-unchanged`/`skip-worktree` are invisible to `git status`, so the worktree checks cannot
   see them.
 - `cmm clean` scans twice (once for the plan, once inside `execute_fresh`).
+- Storage (§11): see "Accuracy and limits" there.
 
 ### Development
 
@@ -522,3 +579,65 @@ Code comments refer to these by number ("safeguard 1"); they take precedence ove
 - Checks: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`;
   desktop also `pnpm -w lint`, `pnpm -w typecheck` and the Vitest suites. Filesystem tests use `tempfile`
   fixtures — **never** touch the real home directory in tests.
+
+## 11. Storage breakdown
+
+The Overview's capacity bar shows "Other used" = used − what the last scan found, and the scan only measures
+what its rules target. The Storage view (`storage.rs`, `cmm storage`) explains all of the used space instead.
+It is read-only: it walks and sizes, and the UI offers Reveal in Finder and a link to the matching findings,
+never a delete button.
+
+**Accounting.** On APFS the startup disk is a container shared by several volumes. `statfs` reports the
+container's free blocks for every volume, so a volume's own use comes from `getattrlist(ATTR_VOL_SPACEUSED)`
+(what `df` shows). `used = total − free` (the Overview's numbers) splits exactly into:
+
+- **macOS** (group of `Volume` nodes, sized, not walked): every other mounted volume of the home's container —
+  the sealed System snapshot `/`, VM (swap files, sleep image), Preboot, Recovery, Update — plus "Other container
+  space" = used − Data volume − those volumes (unmounted volumes, container metadata). A non-system volume of the
+  same container (`/Volumes/X`) is its own top-level node.
+- **The Data volume** (the volume holding home, mounted at `/System/Volumes/Data`), walked from its root with
+  one shared `Sizer` (hardlinks counted once across the whole breakdown). Its top-level entries are reached
+  through `/usr/share/firmlinks` (`Users` → `/Users`, `Applications` → `/Applications`, …), so paths are the ones
+  Finder and the findings use. They are regrouped into: `/Applications`; one node per visible home folder
+  (`~/Library`, `~/Developer`, …, labelled `~/Name`); "Other in home" (hidden entries such as `~/.npm`, loose files,
+  small folders); "Other users & Shared"; "System data" (everything else: `/Library`, `/private`, `/opt`,
+  `/System/Volumes/Data/System`, Spotlight and other indexes).
+- **Not measured** = Data volume used − walked, never negative. It holds what no readable file accounts for:
+  local snapshots (`tmutil listlocalsnapshots /`, names only), folders that need Full Disk Access or root,
+  file-system metadata. When the walk exceeds the volume's use (APFS clones are counted per copy) it is 0 and
+  `overcount_bytes` says by how much.
+
+So the top-level nodes add up to `used_bytes` (`walked + volumes + unmeasured`), plus `overcount_bytes` when
+there is one.
+
+**Tree.** `Sizer::size_tree` is the same parallel `getattrlistbulk` walk as `size_of` (no symlinks followed, no
+other devices, `EPERM` → `Unreadable::Protected`, `EACCES` → `Denied`, flags merged upwards). The breakdown keeps
+every entry of at least 50 MB at any depth, up to 200 per folder; smaller ones are summed into a `rest` node
+("N smaller items"). Unreadable entries are kept whatever their size so they stay visible. On a developer Mac
+with millions of files this is a few thousand nodes (a few MB of JSON) and takes well under a minute. `children(path)` lists one
+folder fully (up to 1000 entries) for drilling below the kept tree or opening a "smaller items" row.
+
+**Found marks.** `annotate` (re)computes `found_bytes` for a report without walking: findings are
+de-duplicated like the Overview's `dedupedTotal` (path-less ones count in the total only); each is placed in the
+deepest node whose path contains it (looking through groups; never a `Volume`; a `rest` node stands for its
+folder's smaller entries and wins only when no kept sibling contains the finding), and a node whose path is
+exactly a finding's path is wholly found with everything below it. A node's `found_bytes` is
+`min(bytes, placed + children's)`, so the map never claims more than it shows. `found_bytes` of the breakdown is
+`min(used, de-duplicated total)` — the Overview's "Found by last scan" — and `found_located_bytes` the part
+placed in nodes. The Storage summary bar is the Overview's with "Other used" split into "measured" and
+"Not measured", so the two screens never disagree.
+
+**Caching.** The app measures on a blocking thread with "storage://progress" events (walked bytes against
+the Data volume's use) and keeps the result in memory and in `last-storage.json`; `storage_cached` re-annotates
+it for the current last report on every call. The screen measures again when there is no measurement or a scan
+finished after it ("cached per scan"), and on "Measure Again". The UI state lives in `storageState.ts`, outside
+React, so a measurement keeps running while the user is on another screen.
+
+**Accuracy and limits.**
+- A hardlinked file is counted once, in whichever folder the parallel walk reached first; sizing one folder
+  alone (`cmm du`, `du -sk`) counts it there, so per-folder numbers can differ slightly between the two.
+- APFS clones and snapshots share blocks; the walk counts clones per copy and cannot size snapshots
+  (they are part of "Not measured").
+- Without Full Disk Access (or as a non-root user) protected folders — the Trash, Mail, some containers,
+  `/private/var/db`, Spotlight's index — are flagged and their size falls into "Not measured".
+- Purgeable space is not separated out: purgeable files that can be read are counted where they are.

@@ -14,6 +14,7 @@ pub mod du;
 pub mod history;
 pub mod rules;
 pub mod scan;
+pub mod storage;
 
 /// Built-in catalog plus `data_dir/rules.d` overrides.
 pub fn load_rules(config: &Config) -> Result<Vec<RuleDef>> {

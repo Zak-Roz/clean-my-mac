@@ -172,3 +172,47 @@ export const TerminalIcon = (p: IconProps) => (
     <path d="m4.75 6.25 2 1.75-2 1.75M8.5 10h2.75" />
   </Icon>
 );
+
+/** Storage: a pie with one slice pulled out. */
+export const StorageIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M7.25 2.8a5.5 5.5 0 1 0 6 6h-6Z" />
+    <path d="M9.25 1.75a5 5 0 0 1 5 5h-5Z" />
+  </Icon>
+);
+
+export const DocIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 2.25h5l3 3v8.5a.5.5 0 0 1-.5.5h-7.5a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5Z" />
+    <path d="M9 2.25v3h3" />
+  </Icon>
+);
+
+export const DiskIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="2" y="4.25" width="12" height="7.5" rx="1.5" />
+    <path d="M4.5 9.25h4" />
+    <circle cx="11.5" cy="9.25" r="0.6" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
+export const LayersIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="m8 2.5 5.75 3L8 8.5 2.25 5.5Z" />
+    <path d="m2.25 8.25 5.75 3 5.75-3M2.25 11 8 14l5.75-3" />
+  </Icon>
+);
+
+export const EllipsisIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="4" cy="8" r="0.8" fill="currentColor" stroke="none" />
+    <circle cx="8" cy="8" r="0.8" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="8" r="0.8" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
+export const DashedCircleIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="8" cy="8" r="5.75" strokeDasharray="2.2 2" />
+  </Icon>
+);

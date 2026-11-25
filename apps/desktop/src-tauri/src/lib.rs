@@ -4,14 +4,17 @@
 
 mod commands;
 mod preview;
+mod storage;
 mod tray;
 
 use cmm_core::Config;
 use tauri::{Manager, RunEvent, WindowEvent};
 
 pub fn run() {
+    let config = Config::load();
     let app = tauri::Builder::default()
-        .manage(commands::AppState::new(Config::load()))
+        .manage(storage::StorageState::new(&config))
+        .manage(commands::AppState::new(config))
         .manage(preview::PreviewState::default())
         .setup(|app| {
             if let Err(e) = tray::setup(app.handle()) {
@@ -47,6 +50,9 @@ pub fn run() {
             commands::agent_uninstall,
             preview::thumbnail,
             preview::quick_look,
+            storage::storage_cached,
+            storage::measure_storage,
+            storage::storage_children,
         ])
         .build(tauri::generate_context!())
         .expect("error while building clean-my-mac");

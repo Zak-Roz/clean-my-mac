@@ -14,6 +14,7 @@ pub mod process;
 pub mod rules;
 pub mod scan;
 pub mod size;
+pub mod storage;
 pub mod volume;
 
 pub use config::Config;

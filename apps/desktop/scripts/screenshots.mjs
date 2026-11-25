@@ -79,6 +79,14 @@ async function run(browser, scheme) {
   await page.getByText("Still uses disk space").waitFor();
   await shoot(page, scheme, "09-overview-after-clean");
 
+  // Storage: measured on first open, then one level down.
+  await page.getByRole("button", { name: /^Storage/ }).click();
+  await page.getByRole("button", { name: "Measure Again" }).waitFor({ timeout: 15_000 });
+  await shoot(page, scheme, "10-storage");
+  await page.getByRole("button", { name: /^~\/Library/ }).click();
+  await page.getByText("Application Support").first().waitFor();
+  await shoot(page, scheme, "11-storage-library");
+
   await context.close();
 }
 

@@ -22,15 +22,19 @@ Screenshots are generated locally into `docs/screenshots/`, which is git-ignored
   `spawn_blocking`, history opened lazily at `data_dir/history.sqlite` (full scans only), the last
   full scan persisted to `data_dir/last-report.json` and loaded at startup, a Downloads-tab scan
   (browse-only rules) kept in memory apart from it, core errors returned as readable strings.
-- `src/api.ts` — typed wrappers; `src/mock.ts` replaces them when `VITE_MOCK=1` (simulated scan
-  progress, plan/execute with one blocked and one failing item, ~90 days of synthetic history).
-- `src/state.tsx` — app state (volume, report, progress, selection, the Downloads tab's own scan and
-  selection, the Confirm sheet's ids) behind `useApp()`.
-- `src/lib/` — pure logic: risk/selection rules, nested-path de-duplication, grouping, formatting; `downloads.ts`
-  for the Downloads tab (kinds, opened state, sorting, filters, ranges, main-scan badges).
 - `src-tauri/src/preview.rs` — Downloads previews: QuickLook thumbnails (PNG over IPC, in-memory cache) and the
   Quick Look panel, both limited to paths whose canonical location is inside `~/Downloads`.
-- `src/screens/` — Overview, Findings (+ selection bar), Downloads, Confirm sheet, History, Settings.
+- `src-tauri/src/storage.rs` — the Storage view's commands (`storage_cached`, `measure_storage` with
+  "storage://progress", `storage_children`); the last measurement kept in `data_dir/last-storage.json`.
+- `src/api.ts` — typed wrappers; `src/mock.ts` replaces them when `VITE_MOCK=1` (simulated scan
+  progress, plan/execute with one blocked and one failing item, ~90 days of synthetic history,
+  an invented storage breakdown from `src/mockStorage.ts`).
+- `src/state.tsx` — app state (volume, report, progress, selection, the Downloads tab's own scan and
+  selection, the Confirm sheet's ids) behind `useApp()`; `src/storageState.ts` keeps the Storage
+  measurement outside React so it survives screen changes.
+- `src/lib/` — pure logic: risk/selection rules, nested-path de-duplication, grouping, formatting; `downloads.ts`
+  for the Downloads tab (kinds, opened state, sorting, filters, ranges, main-scan badges).
+- `src/screens/` — Overview, Findings (+ selection bar), Downloads, Storage, Confirm sheet, History, Settings.
 - `src/components/` — window chrome, small UI primitives, hand-rolled SVG charts.
 
 ## Passive monitoring

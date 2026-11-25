@@ -331,6 +331,122 @@ pub struct FreeSpacePoint {
     pub free_bytes: u64,
 }
 
+/// What a [`StorageNode`] stands for (ARCHITECTURE.md §11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum StorageKind {
+    /// Several nodes shown together ("macOS", "Other in home", "System data", "Other users").
+    Group,
+    /// An APFS volume of the startup container, sized with `statfs` (System, VM, Preboot, …).
+    Volume,
+    Folder,
+    File,
+    /// The direct entries of `path` too small (or too many) to list one by one.
+    Rest,
+    /// Used space no walked file accounts for (snapshots, unreadable folders, APFS metadata).
+    Unmeasured,
+}
+
+/// Why part of a [`StorageNode`] could not be read; its size is then a lower bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum Unreadable {
+    /// `EPERM`: protected by macOS privacy controls (Full Disk Access) or System Integrity Protection.
+    Protected,
+    /// `EACCES` or another error: owned by the system or another user.
+    Denied,
+}
+
+/// One part of the used space: a folder, file, volume or group (Storage view).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageNode {
+    /// Unique within a breakdown: the absolute path, or "@…" for nodes without one
+    /// ("@macos", "@home-other", "@unmeasured", "PATH/@rest").
+    pub id: String,
+    pub label: String,
+    /// Absolute path (folders, files, volumes' mount points). For a `rest` node: the folder whose
+    /// smaller entries it sums. None for groups and `unmeasured`.
+    pub path: Option<String>,
+    pub kind: StorageKind,
+    /// ALLOCATED bytes, hardlinks counted once per breakdown.
+    pub bytes: u64,
+    pub files: u64,
+    /// Direct entries of a folder (for a `rest` node: how many entries it sums).
+    pub entries: u64,
+    /// Newest mtime of the entry and everything below it.
+    pub modified: Option<DateTime<Utc>>,
+    /// Something in here could not be read: `bytes` is a lower bound.
+    pub unreadable: Option<Unreadable>,
+    /// Bytes of this node the last scan's findings also count (de-duplicated, at most `bytes`).
+    pub found_bytes: u64,
+    /// Short explanation for nodes that are not plain folders.
+    pub note: Option<String>,
+    /// Kept children, biggest first, `rest` last. A folder with `entries > 0` and no children was
+    /// not kept that deep: `storage::children` lists it on demand.
+    pub children: Vec<StorageNode>,
+}
+
+/// The used space of the startup disk split into parts that add up to `used_bytes`
+/// (`total_bytes - free_bytes`, the Overview's used space).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageBreakdown {
+    pub measured_at: DateTime<Utc>,
+    pub duration_ms: u64,
+    /// Id of the scan report whose findings set `found_bytes`; None without a scan.
+    pub scan_id: Option<String>,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub used_bytes: u64,
+    /// Bytes of the walked folders and files (the Data volume, i.e. everything but `volumes`).
+    pub walked_bytes: u64,
+    /// Used space of the other volumes in the container (system, VM, Preboot, …) and the
+    /// container's own overhead, sized with `statfs`.
+    pub volumes_bytes: u64,
+    /// The `unmeasured` node: the Data volume's used space minus `walked_bytes` (never negative).
+    pub unmeasured_bytes: u64,
+    /// `walked_bytes` beyond the Data volume's used space (APFS clones are counted per copy);
+    /// 0 when the parts add up exactly.
+    pub overcount_bytes: u64,
+    pub full_disk_access: bool,
+    /// Names of the local Time Machine snapshots (`tmutil listlocalsnapshots /`); their space is
+    /// part of `unmeasured_bytes`.
+    pub local_snapshots: Vec<String>,
+    /// All findings of `scan_id`, de-duplicated like the Overview's "Found by last scan".
+    pub found_bytes: u64,
+    /// The part of `found_bytes` placed in the nodes (the rest has no path, e.g. Docker data).
+    pub found_located_bytes: u64,
+    /// Top level, biggest first.
+    pub nodes: Vec<StorageNode>,
+    /// Unreadable paths met while walking (capped).
+    pub errors: Vec<ScanError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum StoragePhase {
+    Volumes,
+    Walking,
+    Done,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageProgress {
+    pub phase: StoragePhase,
+    /// Bytes walked so far.
+    pub walked_bytes: u64,
+    /// What the walk should reach: the Data volume's used space (0 if unknown).
+    pub expected_bytes: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

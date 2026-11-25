@@ -1,15 +1,13 @@
-//! `cmm du <path> [--depth 1] [--top 20]` — quick allocated-size breakdown using the core sizer
-//! (parallel, hardlinks counted once, symlinks not followed, other volumes skipped).
+//! `cmm du <path> [--depth 1] [--top 20]` — quick allocated-size breakdown using the core sizer's
+//! tree walk (parallel, hardlinks counted once, symlinks not followed, other volumes skipped).
 
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use cmm_core::config::home_dir;
-use cmm_core::size::{SizeInfo, Sizer};
-use rayon::prelude::*;
+use cmm_core::size::{SizeInfo, SizeTree, Sizer, TreeOptions};
 
 use super::{display_path, fmt_bytes};
 
@@ -27,6 +25,8 @@ pub struct DuArgs {
 #[derive(Debug)]
 pub struct Node {
     pub path: PathBuf,
+    /// A real directory (a symlink never is).
+    pub is_dir: bool,
     pub info: SizeInfo,
     /// Sorted by allocated bytes, biggest first. Empty for files and at the depth limit.
     pub children: Vec<Node>,
@@ -61,51 +61,31 @@ pub fn run(args: DuArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Sizes `path`, breaking directories down `depth` levels. Children on another device are skipped.
+/// Sizes `path`, breaking directories down `depth` levels: the core's tree walk (`Sizer::size_tree`,
+/// also behind the Storage view), so children on another device are skipped.
 pub fn measure(sizer: &Sizer, path: &Path, depth: u32) -> Result<Node> {
-    let meta = path.symlink_metadata().with_context(|| format!("cannot read {}", path.display()))?;
-    Ok(node(sizer, path, &meta, depth))
+    path.symlink_metadata().with_context(|| format!("cannot read {}", path.display()))?;
+    let tree = sizer.size_tree(path, &TreeOptions { max_depth: depth, min_bytes: 0, max_children: usize::MAX });
+    Ok(node(tree, path.to_path_buf()))
 }
 
-fn node(sizer: &Sizer, path: &Path, meta: &std::fs::Metadata, depth: u32) -> Node {
-    if depth == 0 || !meta.is_dir() {
-        return Node { path: path.to_path_buf(), info: sizer.size_of(path), children: Vec::new() };
-    }
-    let entries: Vec<(PathBuf, std::fs::Metadata)> = match std::fs::read_dir(path) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter_map(|e| e.metadata().ok().map(|m| (e.path(), m)))
-            .filter(|(_, m)| m.dev() == meta.dev())
-            .collect(),
-        Err(e) => {
-            sizer.push_error(path.to_string_lossy(), e.to_string());
-            Vec::new()
-        }
-    };
-    let mut children: Vec<Node> = entries.par_iter().map(|(p, m)| node(sizer, p, m, depth - 1)).collect();
-    children.sort_by(|a, b| b.info.bytes.cmp(&a.info.bytes).then_with(|| a.path.cmp(&b.path)));
-
-    // The directory entry itself plus everything below it.
-    let mut info = SizeInfo {
-        bytes: meta.blocks() * 512,
-        logical_bytes: meta.len(),
-        files: 0,
-        newest_mtime: chrono::DateTime::from_timestamp(meta.mtime(), meta.mtime_nsec() as u32),
-    };
-    for child in &children {
-        info.bytes += child.info.bytes;
-        info.logical_bytes += child.info.logical_bytes;
-        info.files += child.info.files;
-        info.newest_mtime = info.newest_mtime.max(child.info.newest_mtime);
-    }
-    Node { path: path.to_path_buf(), info, children }
+fn node(tree: SizeTree, path: PathBuf) -> Node {
+    let children = tree
+        .children
+        .into_iter()
+        .map(|child| {
+            let child_path = path.join(&child.name);
+            node(child, child_path)
+        })
+        .collect();
+    Node { path, is_dir: tree.is_dir, info: tree.info, children }
 }
 
 fn print_children(node: &Node, top: usize, indent: usize) {
     for child in node.children.iter().take(top) {
         let name =
             child.path.file_name().map_or_else(|| child.path.display().to_string(), |n| n.to_string_lossy().into());
-        let slash = if child.path.symlink_metadata().is_ok_and(|m| m.is_dir()) { "/" } else { "" };
+        let slash = if child.is_dir { "/" } else { "" };
         println!("{:>10}  {:>9}  {:indent$}{name}{slash}", fmt_bytes(child.info.bytes), child.info.files, "");
         print_children(child, top, indent + 2);
     }

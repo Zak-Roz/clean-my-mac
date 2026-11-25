@@ -9,7 +9,9 @@
 // - "Open Settings" for Full Disk Access grants it, so the Trash size appears on the next check;
 // - the background-scan toggle installs/uninstalls a pretend LaunchAgent (nothing touches launchd);
 // - the Downloads tab scans a list of invented ~/Downloads entries (no progress events, like the
-//   backend's browse scan), thumbnails are generated placeholder SVGs, Quick Look only logs.
+//   backend's browse scan), thumbnails are generated placeholder SVGs, Quick Look only logs;
+// - Storage has no measurement at first; measuring emits `storage://progress` over ~2.5 s and
+//   returns the invented breakdown of ./mockStorage.ts, found marks from the current scan.
 
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { Api } from "./api";
@@ -24,9 +26,12 @@ import type { GrowthItem } from "./bindings/GrowthItem";
 import type { GrowthKind } from "./bindings/GrowthKind";
 import type { ScanProgress } from "./bindings/ScanProgress";
 import type { ScanReport } from "./bindings/ScanReport";
+import type { StorageBreakdown } from "./bindings/StorageBreakdown";
+import type { StorageProgress } from "./bindings/StorageProgress";
 import type { VolumeInfo } from "./bindings/VolumeInfo";
 import { DOWNLOADS_RULE, entryKind, extensionOf } from "./lib/downloads";
 import { dedupedTotal, isPermanentAction } from "./lib/findings";
+import { mockBreakdown, mockChildren, reannotate } from "./mockStorage";
 
 const GB = 1e9;
 const DAY_MS = 86_400_000;
@@ -72,6 +77,8 @@ function revalidate(f: Finding): { blocked?: string; changed?: string; fails?: s
 export function createMockApi(): Api {
   const progressHandlers = new Set<(p: ScanProgress) => void>();
   const itemHandlers = new Set<(i: CleanItemResult) => void>();
+  const storageHandlers = new Set<(p: StorageProgress) => void>();
+  let storage: StorageBreakdown | null = null;
   const cleaned = new Set<string>();
   const recordedScans: FreeSpacePoint[] = [];
   let lastReport: ScanReport | null = null;
@@ -292,6 +299,37 @@ export function createMockApi(): Api {
       const wrapped = (i: CleanItemResult) => handler(i);
       itemHandlers.add(wrapped);
       const stop: UnlistenFn = () => itemHandlers.delete(wrapped);
+      return stop;
+    },
+    storageCached: async () => {
+      await sleep(80);
+      return storage && reannotate(storage, lastReport?.findings ?? [], lastReport?.id ?? null);
+    },
+    measureStorage: async () => {
+      const vol = await currentVolume();
+      const expectedBytes = vol.totalBytes - vol.freeBytes - 41 * GB;
+      const emit = (p: StorageProgress) => {
+        for (const h of storageHandlers) h(p);
+      };
+      emit({ phase: "volumes", walkedBytes: 0, expectedBytes: 0 });
+      await sleep(250);
+      const steps = 10;
+      for (let i = 0; i <= steps; i += 1) {
+        emit({ phase: "walking", walkedBytes: Math.round((expectedBytes * 0.93 * i) / steps), expectedBytes });
+        await sleep(220);
+      }
+      emit({ phase: "done", walkedBytes: Math.round(expectedBytes * 0.93), expectedBytes });
+      storage = mockBreakdown(vol, [], new Date().toISOString());
+      return reannotate(storage, lastReport?.findings ?? [], lastReport?.id ?? null);
+    },
+    storageChildren: async (path) => {
+      await sleep(300);
+      return mockChildren(storage, path, lastReport?.findings ?? []);
+    },
+    onStorageProgress: async (handler) => {
+      const wrapped = (p: StorageProgress) => handler(p);
+      storageHandlers.add(wrapped);
+      const stop: UnlistenFn = () => storageHandlers.delete(wrapped);
       return stop;
     },
   };

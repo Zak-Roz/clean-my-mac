@@ -14,9 +14,13 @@
 //!
 //! Unreadable directories and entries are recorded as [`ScanError`]s (see [`Sizer::take_errors`])
 //! instead of being silently skipped. Entries that vanish mid-walk are ignored.
+//!
+//! [`Sizer::size_tree`] is the same walk, but it also keeps the biggest descendants (for the
+//! Storage view and `cmm du`) and says which parts could not be read.
 
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
+use std::ffi::{OsStr, OsString};
 use std::fs::Metadata;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -28,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
-use crate::model::ScanError;
+use crate::model::{ScanError, Unreadable};
 
 /// At most this many errors are kept per [`Sizer`]; the rest are counted and summarised.
 const MAX_ERRORS: usize = 200;
@@ -47,6 +51,103 @@ pub struct SizeInfo {
     pub newest_mtime: Option<DateTime<Utc>>,
 }
 
+/// What [`Sizer::size_tree`] keeps of a walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeOptions {
+    /// Children are kept down to this many levels below the root (`0`: the root alone).
+    pub max_depth: u32,
+    /// Entries allocating less than this are not kept one by one but summed into their parent's
+    /// [`SizeTree::rest`].
+    pub min_bytes: u64,
+    /// At most this many children are kept per directory (the biggest); the others go to `rest`.
+    pub max_children: usize,
+}
+
+/// A sized entry and its biggest descendants, as kept by [`Sizer::size_tree`].
+///
+/// For a directory: `info` = its own entry + every kept child's `info` + `rest`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SizeTree {
+    /// File name (for the root of a walk: the last path component, or the whole path for `/`).
+    pub name: OsString,
+    /// A real directory (`symlink_metadata`: a symlink is never one).
+    pub is_dir: bool,
+    /// The entry and everything below it.
+    pub info: SizeInfo,
+    /// Number of direct entries (directories only; entries on another device are not counted).
+    pub entries: u64,
+    /// The directory was within `max_depth`, so its children were considered for keeping. When
+    /// false, `children` and `rest` are empty: the entries were walked (sized) but not listed.
+    pub expanded: bool,
+    /// Kept children, biggest first (ties by name).
+    pub children: Vec<SizeTree>,
+    /// The direct entries that were not kept (too small, too many, or below `max_depth`).
+    pub rest: Rest,
+    /// This directory, or something below it, could not be (fully) read: `info` is a lower bound.
+    pub unreadable: Option<Unreadable>,
+}
+
+/// Direct entries of a directory summed together instead of kept one by one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Rest {
+    pub entries: u64,
+    pub bytes: u64,
+    pub files: u64,
+    pub newest_mtime: Option<DateTime<Utc>>,
+}
+
+impl Rest {
+    fn add(&mut self, info: &SizeInfo) {
+        self.entries += 1;
+        self.bytes += info.bytes;
+        self.files += info.files;
+        self.newest_mtime = self.newest_mtime.max(info.newest_mtime);
+    }
+}
+
+/// What could not be read below a directory, merged upwards. `EPERM` (privacy protection / SIP)
+/// wins over `EACCES` when both occur: it is the one Full Disk Access can fix.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Unread {
+    protected: bool,
+    denied: bool,
+}
+
+impl Unread {
+    fn merge(self, other: Unread) -> Unread {
+        Unread { protected: self.protected || other.protected, denied: self.denied || other.denied }
+    }
+
+    fn of(error: &io::Error) -> Unread {
+        match error.kind() {
+            io::ErrorKind::NotFound => Unread::default(), // vanished mid-walk
+            _ if error.raw_os_error() == Some(libc::EPERM) => Unread { protected: true, denied: false },
+            _ => Unread { protected: false, denied: true },
+        }
+    }
+
+    fn flag(self) -> Option<Unreadable> {
+        if self.protected {
+            Some(Unreadable::Protected)
+        } else if self.denied {
+            Some(Unreadable::Denied)
+        } else {
+            None
+        }
+    }
+}
+
+/// A directory walked by [`Sizer::size_tree`], without its own entry.
+#[derive(Default)]
+struct DirTree {
+    acc: Acc,
+    entries: u64,
+    expanded: bool,
+    children: Vec<SizeTree>,
+    rest: Rest,
+    unread: Unread,
+}
+
 /// Shared, thread-safe sizer. One instance per scan: it remembers hardlinked inodes (so they are
 /// counted once across all calls) and collects the errors met while walking.
 #[derive(Debug)]
@@ -54,6 +155,8 @@ pub struct Sizer {
     hardlinks: Vec<Mutex<HashSet<(u64, u64)>>>,
     errors: Mutex<Vec<ScanError>>,
     dropped_errors: AtomicU64,
+    /// Allocated bytes of every directory listed so far (for progress reporting).
+    visited: AtomicU64,
 }
 
 impl Default for Sizer {
@@ -96,6 +199,42 @@ impl Sizer {
             hardlinks: (0..SHARDS).map(|_| Mutex::new(HashSet::new())).collect(),
             errors: Mutex::new(Vec::new()),
             dropped_errors: AtomicU64::new(0),
+            visited: AtomicU64::new(0),
+        }
+    }
+
+    /// Allocated bytes counted so far by all walks of this sizer (grows while a walk runs).
+    pub fn visited_bytes(&self) -> u64 {
+        self.visited.load(Ordering::Relaxed)
+    }
+
+    /// Like [`Sizer::size_of`], but keeps the biggest descendants (see [`TreeOptions`]) and flags
+    /// what could not be read. Same rules: no symlinks followed, no other devices, hardlinks once.
+    /// A missing path yields an empty, non-directory tree.
+    pub fn size_tree(&self, path: &Path, opts: &TreeOptions) -> SizeTree {
+        let name = path.file_name().map_or_else(|| path.as_os_str().to_owned(), OsStr::to_owned);
+        let meta = match path.symlink_metadata() {
+            Ok(meta) => meta,
+            Err(e) => {
+                self.record_io_error(path, &e);
+                return SizeTree { name, unreadable: Unread::of(&e).flag(), ..SizeTree::default() };
+            }
+        };
+        let mut own = Acc::default();
+        self.account(&meta, &mut own);
+        if !meta.is_dir() {
+            return SizeTree { name, info: own.into_info(), ..SizeTree::default() };
+        }
+        let dir = self.tree_dir(path, meta.dev(), 0, opts);
+        SizeTree {
+            name,
+            is_dir: true,
+            info: own.merge(dir.acc).into_info(),
+            entries: dir.entries,
+            expanded: dir.expanded,
+            children: dir.children,
+            rest: dir.rest,
+            unreadable: dir.unread.flag(),
         }
     }
 
@@ -139,64 +278,61 @@ impl Sizer {
         errors
     }
 
-    fn walk_dir(&self, dir: &Path, dev: u64) -> Acc {
-        let mut acc = Acc::default();
-        let mut subdirs = Vec::new();
+    /// Calls `on_entry(name, stat)` for every entry of `dir` on device `dev` (mount points and
+    /// other devices are skipped: not ours to count). Unreadable directories and entries are
+    /// recorded as errors; the result says what could not be read.
+    fn list(&self, dir: &Path, dev: u64, mut on_entry: impl FnMut(&OsStr, &bulk::Stat)) -> Unread {
+        let mut unread = Unread::default();
         let listed = bulk::list_dir(dir, |entry| match entry {
             Ok(entry) => {
-                if entry.dev != dev || entry.mount_point {
-                    return; // a mount point: another volume, not ours to count
-                }
-                self.account_stat(dev, &entry.stat, &mut acc);
-                if entry.stat.is_dir {
-                    subdirs.push(dir.join(entry.name));
+                if entry.dev == dev && !entry.mount_point {
+                    on_entry(entry.name, &entry.stat);
                 }
             }
-            Err((name, error)) => self.record_io_error(&dir.join(name), &error),
+            Err((name, error)) => unread = unread.merge(self.record_unreadable(&dir.join(name), &error)),
         });
         match listed {
-            Ok(()) => {}
-            Err(e) if bulk::unsupported(&e) => return self.walk_dir_std(dir, dev),
-            Err(e) => self.record_io_error(dir, &e),
+            Ok(()) => unread,
+            Err(e) if bulk::unsupported(&e) => self.list_std(dir, dev, on_entry),
+            Err(e) => unread.merge(self.record_unreadable(dir, &e)),
         }
-        self.walk_subdirs(acc, &subdirs, dev)
     }
 
     /// Portable fallback for file systems without `getattrlistbulk` support.
-    fn walk_dir_std(&self, dir: &Path, dev: u64) -> Acc {
+    fn list_std(&self, dir: &Path, dev: u64, mut on_entry: impl FnMut(&OsStr, &bulk::Stat)) -> Unread {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
-            Err(e) => {
-                self.record_io_error(dir, &e);
-                return Acc::default();
-            }
+            Err(e) => return self.record_unreadable(dir, &e),
         };
-        let mut acc = Acc::default();
-        let mut subdirs = Vec::new();
+        let mut unread = Unread::default();
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(e) => {
-                    self.record_io_error(dir, &e);
+                    unread = unread.merge(self.record_unreadable(dir, &e));
                     continue;
                 }
             };
             // DirEntry::metadata is lstat: symlinks are reported as links, never followed.
-            let meta = match entry.metadata() {
-                Ok(meta) => meta,
-                Err(e) => {
-                    self.record_io_error(&entry.path(), &e);
-                    continue;
-                }
-            };
-            if meta.dev() != dev {
-                continue;
-            }
-            self.account(&meta, &mut acc);
-            if meta.is_dir() {
-                subdirs.push(entry.path());
+            match entry.metadata() {
+                Ok(meta) if meta.dev() == dev => on_entry(&entry.file_name(), &stat_of(&meta)),
+                Ok(_) => {}
+                Err(e) => unread = unread.merge(self.record_unreadable(&entry.path(), &e)),
             }
         }
+        unread
+    }
+
+    fn walk_dir(&self, dir: &Path, dev: u64) -> Acc {
+        let mut acc = Acc::default();
+        let mut subdirs = Vec::new();
+        self.list(dir, dev, |name, stat| {
+            self.account_stat(dev, stat, &mut acc);
+            if stat.is_dir {
+                subdirs.push(dir.join(name));
+            }
+        });
+        self.visited.fetch_add(acc.bytes, Ordering::Relaxed);
         self.walk_subdirs(acc, &subdirs, dev)
     }
 
@@ -208,16 +344,73 @@ impl Sizer {
         }
     }
 
-    fn account(&self, meta: &Metadata, acc: &mut Acc) {
-        let stat = bulk::Stat {
-            is_dir: meta.is_dir(),
-            ino: meta.ino(),
-            nlink: meta.nlink(),
-            size: meta.len(),
-            alloc: meta.blocks() * 512,
-            mtime: (meta.mtime(), meta.mtime_nsec()),
+    /// The tree walk behind [`Sizer::size_tree`]: `dir` sits `depth` levels below the root, so its
+    /// children are kept only while `depth < max_depth`.
+    fn tree_dir(&self, dir: &Path, dev: u64, depth: u32, opts: &TreeOptions) -> DirTree {
+        let keep = depth < opts.max_depth;
+        let mut out = DirTree { expanded: keep, ..DirTree::default() };
+        let mut candidates = Vec::new();
+        // Subdirectories with their own entry's size; their contents are walked below.
+        let mut subdirs: Vec<(OsString, Acc)> = Vec::new();
+        out.unread = self.list(dir, dev, |name, stat| {
+            out.entries += 1;
+            let mut own = Acc::default();
+            self.account_stat(dev, stat, &mut own);
+            if stat.is_dir {
+                subdirs.push((name.to_owned(), own));
+                return;
+            }
+            out.acc = out.acc.merge(own);
+            if keep && own.bytes >= opts.min_bytes {
+                candidates.push(SizeTree { name: name.to_owned(), info: own.into_info(), ..SizeTree::default() });
+            } else if keep {
+                out.rest.add(&own.into_info());
+            }
+        });
+        self.visited
+            .fetch_add(out.acc.bytes + subdirs.iter().map(|(_, own)| own.bytes).sum::<u64>(), Ordering::Relaxed);
+
+        let walk = |(name, own): (OsString, Acc)| {
+            let sub = self.tree_dir(&dir.join(&name), dev, depth + 1, opts);
+            (name, own, sub)
         };
-        self.account_stat(meta.dev(), &stat, acc);
+        let walked: Vec<(OsString, Acc, DirTree)> = if subdirs.len() > 1 {
+            subdirs.into_par_iter().map(walk).collect()
+        } else {
+            subdirs.into_iter().map(walk).collect()
+        };
+        for (name, own, sub) in walked {
+            let info = own.merge(sub.acc);
+            out.acc = out.acc.merge(info);
+            out.unread = out.unread.merge(sub.unread);
+            if keep && info.bytes >= opts.min_bytes {
+                candidates.push(SizeTree {
+                    name,
+                    is_dir: true,
+                    info: info.into_info(),
+                    entries: sub.entries,
+                    expanded: sub.expanded,
+                    children: sub.children,
+                    rest: sub.rest,
+                    unreadable: sub.unread.flag(),
+                });
+            } else if keep {
+                out.rest.add(&info.into_info());
+            }
+        }
+
+        candidates.sort_by(|a, b| b.info.bytes.cmp(&a.info.bytes).then_with(|| a.name.cmp(&b.name)));
+        if candidates.len() > opts.max_children {
+            for dropped in candidates.drain(opts.max_children..) {
+                out.rest.add(&dropped.info);
+            }
+        }
+        out.children = candidates;
+        out
+    }
+
+    fn account(&self, meta: &Metadata, acc: &mut Acc) {
+        self.account_stat(meta.dev(), &stat_of(meta), acc);
     }
 
     fn account_stat(&self, dev: u64, stat: &bulk::Stat, acc: &mut Acc) {
@@ -245,6 +438,22 @@ impl Sizer {
             return; // vanished while walking (temp files, caches being rewritten)
         }
         self.push_error(path.to_string_lossy(), io_message(error));
+    }
+
+    fn record_unreadable(&self, path: &Path, error: &io::Error) -> Unread {
+        self.record_io_error(path, error);
+        Unread::of(error)
+    }
+}
+
+fn stat_of(meta: &Metadata) -> bulk::Stat {
+    bulk::Stat {
+        is_dir: meta.is_dir(),
+        ino: meta.ino(),
+        nlink: meta.nlink(),
+        size: meta.len(),
+        alloc: meta.blocks() * 512,
+        mtime: (meta.mtime(), meta.mtime_nsec()),
     }
 }
 
@@ -581,6 +790,117 @@ mod tests {
         let errors = sizer.take_errors();
         assert_eq!(errors.len(), MAX_ERRORS + 1);
         assert_eq!(errors.last().unwrap().message, "5 more errors not shown");
+    }
+
+    const ALL: TreeOptions = TreeOptions { max_depth: u32::MAX, min_bytes: 0, max_children: usize::MAX };
+
+    /// `info` = own entry + kept children + rest, at every level.
+    fn assert_adds_up(tree: &SizeTree, own_max: u64) {
+        if !tree.expanded {
+            assert!(tree.children.is_empty() && tree.rest == Rest::default(), "{tree:?}");
+            return;
+        }
+        let kept: u64 = tree.children.iter().map(|c| c.info.bytes).sum();
+        let total = kept + tree.rest.bytes;
+        assert!(total <= tree.info.bytes && tree.info.bytes - total <= own_max, "{tree:?}");
+        assert_eq!(tree.children.len() as u64 + tree.rest.entries, tree.entries, "{:?}", tree.name);
+        tree.children.iter().for_each(|c| assert_adds_up(c, own_max));
+    }
+
+    #[test]
+    fn size_tree_matches_size_of_and_sorts_children() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("big/inner/a.bin"), 300_000);
+        write(&dir.path().join("big/b.bin"), 100_000);
+        write(&dir.path().join("mid.bin"), 200_000);
+        write(&dir.path().join("small.bin"), 10_000);
+        let tree = Sizer::new().size_tree(dir.path(), &ALL);
+        assert_eq!(tree.info, Sizer::new().size_of(dir.path()));
+        assert!(tree.is_dir);
+        let names: Vec<_> = tree.children.iter().map(|c| c.name.to_str().unwrap()).collect();
+        assert_eq!(names, vec!["big", "mid.bin", "small.bin"]);
+        assert_eq!(tree.children[0].children[0].name, "inner");
+        assert_eq!(tree.rest, Rest::default());
+        assert_eq!(tree.unreadable, None);
+        assert_adds_up(&tree, 64 * 1024);
+    }
+
+    #[test]
+    fn size_tree_sums_small_deep_and_extra_entries_into_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("big/inner/a.bin"), 300_000);
+        write(&dir.path().join("x1.bin"), 150_000);
+        write(&dir.path().join("x2.bin"), 140_000);
+        write(&dir.path().join("tiny.bin"), 1_000);
+        let opts = TreeOptions { max_depth: 1, min_bytes: 100_000, max_children: 2 };
+        let tree = Sizer::new().size_tree(dir.path(), &opts);
+        let names: Vec<_> = tree.children.iter().map(|c| c.name.to_str().unwrap()).collect();
+        assert_eq!(names, vec!["big", "x1.bin"], "two biggest kept");
+        assert_eq!(tree.rest.entries, 2, "x2.bin (over max_children) and tiny.bin (under min_bytes)");
+        assert_eq!(tree.rest.files, 2);
+        assert!(tree.rest.bytes >= 141_000);
+        let big = &tree.children[0];
+        assert!(!big.expanded && big.children.is_empty(), "below max_depth nothing is kept");
+        assert_eq!(big.entries, 1, "but its entries are counted");
+        assert_eq!(big.rest, Rest::default());
+        assert_eq!(tree.info, Sizer::new().size_of(dir.path()), "sizes are complete whatever is kept");
+        assert_adds_up(&tree, 64 * 1024);
+    }
+
+    #[test]
+    fn size_tree_flags_unreadable_folders_upwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("a/locked");
+        write(&locked.join("secret.bin"), 1000);
+        write(&dir.path().join("b/ok.bin"), 1000);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let sizer = Sizer::new();
+        let tree = sizer.size_tree(dir.path(), &ALL);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(tree.unreadable, Some(Unreadable::Denied));
+        let a = tree.children.iter().find(|c| c.name == "a").unwrap();
+        let b = tree.children.iter().find(|c| c.name == "b").unwrap();
+        assert_eq!(a.unreadable, Some(Unreadable::Denied));
+        assert_eq!(a.children[0].unreadable, Some(Unreadable::Denied));
+        assert_eq!(a.children[0].entries, 0);
+        assert_eq!(b.unreadable, None);
+        assert_eq!(sizer.take_errors().len(), 1);
+    }
+
+    #[test]
+    fn size_tree_counts_hardlinks_once_and_never_follows_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        write(&target.path().join("huge.bin"), 512 * 1024);
+        write(&dir.path().join("a/data.bin"), 64 * 1024);
+        fs::create_dir(dir.path().join("b")).unwrap();
+        fs::hard_link(dir.path().join("a/data.bin"), dir.path().join("b/data.bin")).unwrap();
+        std::os::unix::fs::symlink(target.path(), dir.path().join("link")).unwrap();
+        let tree = Sizer::new().size_tree(dir.path(), &ALL);
+        assert_eq!(tree.info.files, 2, "one inode for the two names + the link itself");
+        assert!(tree.info.logical_bytes < 2 * 64 * 1024);
+        let link = tree.children.iter().find(|c| c.name == "link").unwrap();
+        assert!(!link.is_dir, "a symlink is never a folder");
+        assert!(link.info.bytes < 64 * 1024);
+
+        let root_link = Sizer::new().size_tree(&dir.path().join("link"), &ALL);
+        assert!(!root_link.is_dir && root_link.children.is_empty());
+        let missing = Sizer::new().size_tree(&dir.path().join("nope"), &ALL);
+        assert_eq!(missing.info, SizeInfo::default());
+        assert_eq!(missing.unreadable, None, "a missing path is not unreadable");
+    }
+
+    #[test]
+    fn visited_bytes_grow_with_every_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("a/b.bin"), 100_000);
+        let sizer = Sizer::new();
+        assert_eq!(sizer.visited_bytes(), 0);
+        let info = sizer.size_of(dir.path());
+        let after_one = sizer.visited_bytes();
+        assert!(after_one >= 100_000 && after_one <= info.bytes);
+        sizer.size_tree(dir.path(), &ALL);
+        assert!(sizer.visited_bytes() > after_one);
     }
 
     #[test]

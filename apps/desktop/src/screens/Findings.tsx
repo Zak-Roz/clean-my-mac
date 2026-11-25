@@ -53,6 +53,7 @@ import {
   setTitle,
   showLogical,
 } from "../lib/findings";
+import { clearFindingsQuery, peekFindingsQuery } from "../lib/findingsLink";
 import { formatBytes, formatCount, relativeTime, tildify } from "../lib/format";
 import { useApp } from "../state";
 
@@ -61,8 +62,10 @@ type RiskFilter = Risk | "all";
 export function Findings() {
   const { report } = useApp();
   const [risk, setRisk] = useState<RiskFilter>("all");
-  const [query, setQuery] = useState("");
+  // Opened from Storage's "found" link: start with that search.
+  const [query, setQuery] = useState(() => peekFindingsQuery() ?? "");
   const searchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => clearFindingsQuery(), []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
